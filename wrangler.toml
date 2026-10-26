@@ -1,0 +1,33 @@
+# Cloudflare Worker configuration. Everything here fits the Workers Free plan.
+name = "family-movie-night-lottery"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# The automatic check: every minute, look for the ninth valid submission.
+[triggers]
+crons = ["* * * * *"]
+
+# One SQLite-backed Durable Object holds the lottery state (free plan supports SQLite DOs).
+[[durable_objects.bindings]]
+name = "LOTTERY"
+class_name = "LotteryDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LotteryDO"]
+
+[vars]
+# Exactly nine names, comma-separated. They must match the "Your Name" options in Notion.
+FAMILY_MEMBERS = "Maria,John,Grandma Rose,Grandpa Joe,Ana,Luis,Sofia,Diego,Elena"
+# Public link of the Notion Form ("Share form" -> "Anyone with the link").
+NOTION_FORM_URL = ""
+# ID or URL of the "Movie Submissions" database (the one the form writes to).
+NOTION_SUBMISSIONS_DB = ""
+# Optional: ID or URL of the "Lottery Rounds" results database.
+NOTION_ROUNDS_DB = ""
+# Seconds the "Drawing our winner..." screen shows before the reveal.
+REVEAL_DELAY_SECONDS = "20"
+
+# Secrets (never put these in this file):
+#   npx wrangler secret put NOTION_TOKEN
+#   npx wrangler secret put ADMIN_TOKEN

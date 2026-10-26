@@ -1,0 +1,3 @@
+# Copy to .dev.vars for `npm run dev` (local only, git-ignored).
+NOTION_TOKEN=ntn_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ADMIN_TOKEN=change-me-to-a-long-random-string
