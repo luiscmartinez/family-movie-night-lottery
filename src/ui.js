@@ -405,7 +405,7 @@ document.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
   if (b.id === 'draw') return act('draw', {}, 'Draw the winning movie now? This can only happen once per round.');
-  if (b.id === 'new-round') return act('new-round', {}, 'Start a new movie night? Progress resets to 0 of 9. Past winners are kept.');
+  if (b.id === 'new-round') return act('new-round', {}, 'Start a new movie night? Progress resets to 0 of ' + state.total + '. Past winners are kept.');
   if (b.id === 'logout') return call('/api/admin/logout', {}).finally(showLogin);
   const id = Number(b.dataset.id);
   if (b.dataset.act === 'remove') return act('remove', { id }, 'Remove this submission? You can restore it later.');

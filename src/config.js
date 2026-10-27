@@ -1,6 +1,8 @@
 // Reads and validates the Worker environment (dashboard variables + secrets).
 
-export const FAMILY_SIZE = 9;
+// Everyone listed in FAMILY_MEMBERS takes part; the draw needs one movie from each.
+export const MIN_MEMBERS = 2;
+export const MAX_MEMBERS = 30;
 export const MAX_TITLE_LENGTH = 120;
 export const MIN_ADMIN_PASSWORD_LENGTH = 12;
 
@@ -11,9 +13,9 @@ export function parseMembers(value) {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  if (members.length !== FAMILY_SIZE) {
+  if (members.length < MIN_MEMBERS || members.length > MAX_MEMBERS) {
     throw new ConfigError(
-      `FAMILY_MEMBERS must list exactly ${FAMILY_SIZE} comma-separated names (found ${members.length}).`,
+      `FAMILY_MEMBERS must list between ${MIN_MEMBERS} and ${MAX_MEMBERS} comma-separated names (found ${members.length}).`,
     );
   }
   const seen = new Set();

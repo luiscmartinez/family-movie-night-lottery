@@ -2,7 +2,7 @@
 
 Everyone picks a movie. One movie wins. Let fate decide what we're watching!
 
-Nine family members each submit one movie on the website. No accounts, no app. The organizer reviews the picks on a password-protected `/admin` dashboard, fixes any mistakes, and presses **Draw Winning Movie**. A cryptographically secure, unbiased random draw picks one of the nine movies. The result is saved permanently and shown on the main page.
+Every family member submits one movie on the website. No accounts, no app. The organizer reviews the picks on a password-protected `/admin` dashboard, fixes any mistakes, and presses **Draw Winning Movie**. A cryptographically secure, unbiased random draw picks one of the movies. The result is saved permanently and shown on the main page.
 
 It runs on a single **Cloudflare Worker** with a **SQLite-backed Durable Object** for storage, all on the Workers Free plan. **Workers Builds** deploys it from GitHub on every push.
 
@@ -18,7 +18,7 @@ It runs on a single **Cloudflare Worker** with a **SQLite-backed Durable Object*
 2. [Deploy from GitHub with Workers Builds](#2-deploy-from-github-with-workers-builds)
 3. [Configuration](#3-configuration)
 4. [Administrator guide](#4-administrator-guide)
-5. [Changing the nine family members](#5-changing-the-nine-family-members)
+5. [Changing the family members](#5-changing-the-family-members)
 6. [Security and privacy](#6-security-and-privacy)
 7. [Testing](#7-testing)
 8. [Local development](#8-local-development)
@@ -39,7 +39,7 @@ It runs on a single **Cloudflare Worker** with a **SQLite-backed Durable Object*
  Organizer                              Durable Object (one instance, SQLite)
  ─────────                               rounds · submissions · counters
   /admin (password) ─────────────────►  POST /api/admin/{login, add, edit, remove,
-   ├─ all 9 members + their picks                          restore, draw, new-round}
+   ├─ every member + their picks                           restore, draw, new-round}
    ├─ duplicates highlighted            GET  /api/admin/{state, export}
    ├─ edit / remove / restore / add
    ├─ 🎲 Draw Winning Movie (enabled only when ready)
@@ -53,17 +53,17 @@ Nothing runs on a schedule. There's no polling and no automatic draw. The Worker
 **Who counts:** a family member counts only when they have **exactly one** active submission in the current round.
 
 * If someone submits twice, both entries are shown on the dashboard as **Duplicate** and that person doesn't count. The admin removes the extra one, and can restore it later.
-* The **Draw Winning Movie** button is enabled only when all nine members have exactly one active submission. The server checks this again when the button is pressed.
+* The **Draw Winning Movie** button is enabled only when every family member has exactly one active submission. The server checks this again when the button is pressed.
 
 **The draw:**
-* One click picks one of the nine submissions using `crypto.getRandomValues` with rejection sampling, so every movie has exactly a 1/9 chance.
+* One click picks one of the submissions using `crypto.getRandomValues` with rejection sampling, so every movie has exactly the same chance (1 in 7 for a family of seven).
 * The winner is written with a single compare-and-set update (`UPDATE rounds … WHERE status = 'Open' RETURNING`). Only the first request can draw, so double-clicks and two admins clicking at once still give one winner.
 * After the draw, the round's submissions can't be changed and new submissions are refused.
 
 **What the public sees:**
 * While the round is open: how many people have submitted and who's still missing. Movie titles stay secret.
 * Once everyone has a valid pick: "All movies are in! Waiting for the organizer to draw our winner…"
-* After the draw: the winning movie, who submitted it, the date, and all nine picks.
+* After the draw: the winning movie, who submitted it, the date, and everyone's picks.
 
 ## 2. Deploy from GitHub with Workers Builds
 
@@ -86,7 +86,7 @@ You need a free Cloudflare account. No credit card is needed for the Workers Fre
 
    | Name | Type | Value |
    |---|---|---|
-   | `FAMILY_MEMBERS` | Text | Exactly 9 comma-separated names, for example `Maria,John,Grandma Rose,…` |
+   | `FAMILY_MEMBERS` | Text | One name per family member, comma-separated (2–30 names), for example `Jocelyne,Nino,Nina,…` |
    | `ADMIN_PASSWORD` | **Secret** | A long passphrase (12+ characters), for example four random words |
 
    Saving these applies them right away. No redeploy is needed.
@@ -102,7 +102,7 @@ GitHub Actions (`.github/workflows/test.yml`) runs the tests and a dry-run build
 
 | Name | Where | Required | Purpose |
 |---|---|---|---|
-| `FAMILY_MEMBERS` | Dashboard variable (or `.dev.vars` locally) | ✅ | Exactly 9 unique, comma-separated names. Shown in the form's name dropdown. |
+| `FAMILY_MEMBERS` | Dashboard variable (or `.dev.vars` locally) | ✅ | 2–30 unique, comma-separated names. Sets the family size and the form's name dropdown. |
 | `ADMIN_PASSWORD` | Dashboard **secret** (or `.dev.vars` locally) | ✅ for `/admin` | The admin password, at least 12 characters. The public page works without it, but `/admin` stays locked until it's set. |
 
 There's nothing else to configure: no API keys and no external services.
@@ -120,13 +120,13 @@ Open **`/admin`** and sign in with `ADMIN_PASSWORD`. You stay signed in on that 
 
 **Drawing the winner:** when every member shows ✓ Ready, the **🎲 Draw Winning Movie** button turns on. Click it and confirm. The winner appears on the main page straight away. It's permanent and can't be redrawn.
 
-**Next movie night:** click **Start New Round**. Progress resets to 0 of 9 and the previous winner moves to *Past winners*. Share the same link again.
+**Next movie night:** click **Start New Round**. Progress resets to 0 and the previous winner moves to *Past winners*. Share the same link again.
 
 **Backups:** **Download backup** saves every round and submission as JSON.
 
-## 5. Changing the nine family members
+## 5. Changing the family members
 
-1. In the Cloudflare dashboard, edit the `FAMILY_MEMBERS` variable. There must be exactly nine names, with no duplicates.
+1. In the Cloudflare dashboard, edit the `FAMILY_MEMBERS` variable. List each person once (2–30 names). The family size follows the list automatically: the draw needs one movie from each person.
 2. Save. The change takes effect immediately.
 
 It's best to change names between rounds. If you rename someone mid-round, their earlier entry appears on the dashboard under *Other names* and doesn't count. Add their movie again under the new name.
@@ -163,7 +163,7 @@ The tests run the real lottery code on `node:sqlite`, the same SQL as the Durabl
 | 3. Duplicate, plus one member missing | Draw stays disabled until the admin removes the extra | › 3 |
 | 4. Two draws at the same moment | Two separate DB connections race; exactly one winner is recorded | › 4, 4b |
 | 5. Restart after the draw | Same winner; no more draws, submissions or edits | › 5 |
-| 6. New round | 0 of 9; old submissions excluded; previous winner kept | › 6 |
+| 6. New round | Progress back to 0; old submissions excluded; previous winner kept | › 6 |
 | 7. Bad input | Unknown names, blank or too-long titles rejected; names matched case-insensitively | › 7 |
 | 8. Fairness | Rejection-sampling proof, a chi-square test on 180,000 draws, and 1,800 full rounds | › 8 |
 

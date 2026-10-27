@@ -72,9 +72,11 @@ test('export contains every round and submission', () => {
   assert.equal(out.submissions.length, 9);
 });
 
-test('config: exactly nine unique members and a strong admin password are required', () => {
+test('config: 2-30 unique members and a strong admin password are required', () => {
   assert.equal(parseMembers(MEMBERS.join(', ')).length, 9);
-  assert.throws(() => parseMembers('A,B,C'), ConfigError);
+  assert.equal(parseMembers('A,B,C').length, 3);
+  assert.throws(() => parseMembers('A'), /between 2 and 30/);
+  assert.throws(() => parseMembers(Array.from({ length: 31 }, (_, i) => `P${i}`).join(',')), /between 2 and 30/);
   assert.throws(() => parseMembers([...MEMBERS.slice(0, 8), 'maria'].join(',')), /twice/);
   assert.throws(() => loadConfig({}), /FAMILY_MEMBERS/);
   assert.throws(() => adminPassword({ ADMIN_PASSWORD: 'short' }), /at least 12/);
@@ -132,4 +134,17 @@ test('rate-limit counters reset after their window', () => {
   assert.equal(store.hit('k', 1050, 100), 2);
   assert.equal(store.count('k', 1050, 100), 2);
   assert.equal(store.hit('k', 1200, 100), 1);
+});
+
+test('a family of seven: the draw needs exactly seven picks, each with a 1-in-7 chance', () => {
+  const seven = ['Jocelyne', 'Nino', 'Nina', 'Lali', 'Itzel', 'Ileana', 'Mother'];
+  const lottery = new Lottery({ store: new LotteryStore(nodeDb()), config: loadConfig({ FAMILY_MEMBERS: seven.join(',') }) });
+  seven.slice(0, 6).forEach((name, i) => lottery.submit({ name, title: MOVIES[i] }));
+  assert.equal(lottery.publicStatus().total, 7);
+  assert.equal(lottery.adminState().canDraw, false);
+  lottery.submit({ name: 'mother', title: MOVIES[6] });
+  assert.equal(lottery.publicStatus().state, 'ready');
+  const round = lottery.draw();
+  assert.equal(round.entries.length, 7);
+  assert.ok(seven.includes(round.winnerMember));
 });

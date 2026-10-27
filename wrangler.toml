@@ -10,7 +10,7 @@ workers_dev = true
 # Variables are set in the dashboard (Settings -> Variables and Secrets), not
 # here, so the family's names stay out of this public repository. This flag
 # stops deploys from wiping them.
-#   FAMILY_MEMBERS  (text)    exactly 9 comma-separated names
+#   FAMILY_MEMBERS  (text)    comma-separated names, one per family member (2-30)
 #   ADMIN_PASSWORD  (secret)  at least 12 characters
 keep_vars = true
 
