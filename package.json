@@ -3,14 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Automated, fair movie lottery for nine family members, powered by Notion Forms and a free Cloudflare Worker.",
+  "description": "Fair movie lottery for nine family members: a native submission form, an admin-controlled draw, and a free Cloudflare Worker.",
   "scripts": {
     "test": "node --test --disable-warning=ExperimentalWarning \"test/**/*.test.js\"",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "notion:check": "node scripts/notion-check.mjs",
-    "dev:mock": "wrangler dev --test-scheduled --var NOTION_TOKEN:mock --var ADMIN_TOKEN:local-admin-token-123 --var NOTION_API_BASE:http://127.0.0.1:8788/v1 --var NOTION_SUBMISSIONS_DB:11111111111111111111111111111111 --var NOTION_ROUNDS_DB:33333333333333333333333333333333 --var NOTION_FORM_URL:https://www.notion.so --var REVEAL_DELAY_SECONDS:8",
-    "mock:notion": "node --disable-warning=ExperimentalWarning scripts/mock-notion.mjs"
+    "check": "npm test && wrangler deploy --dry-run --outdir dist"
   },
   "engines": {
     "node": ">=22.13"

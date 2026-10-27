@@ -1,3 +1,5 @@
+# Runs the tests on every push and pull request. Deployment itself is done by
+# Cloudflare Workers Builds, which watches this repository.
 name: Tests
 on: [push, pull_request]
 jobs:
@@ -9,5 +11,4 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - run: npm test
-      - run: npx wrangler deploy --dry-run --outdir dist
+      - run: npm run check

@@ -1,14 +1,25 @@
 // The single Durable Object instance that owns all lottery state.
-// Every check, draw and admin action runs here, so they are serialized.
+// Every submission, admin action and draw runs here, one at a time.
 
 import { DurableObject } from 'cloudflare:workers';
-import { loadConfig } from './config.js';
-import { Lottery } from './lottery.js';
-import { NotionClient } from './notion.js';
+import { AdminAuth } from './auth.js';
+import { adminPassword, ConfigError, loadConfig } from './config.js';
+import { Lottery, LotteryError } from './lottery.js';
 import { LotteryStore, durableObjectDb } from './store.js';
 
-// Page views trigger a fresh Notion check at most this often.
-const REFRESH_AFTER_MS = 15_000;
+export const SUBMIT_LIMIT = 10; // per visitor per hour
+const HOUR = 60 * 60 * 1000;
+
+// Runs fn and turns expected errors into { status, body } results.
+async function respond(fn) {
+  try {
+    return { status: 200, body: await fn() };
+  } catch (e) {
+    if (e instanceof LotteryError) return { status: e.status, body: { error: e.message } };
+    if (e instanceof ConfigError) return { status: 503, body: { error: `Setup needed: ${e.message}` } };
+    throw e;
+  }
+}
 
 export class LotteryDO extends DurableObject {
   constructor(ctx, env) {
@@ -17,44 +28,66 @@ export class LotteryDO extends DurableObject {
   }
 
   lottery() {
-    if (!this._lottery) {
-      const config = loadConfig(this.env);
-      const notion = new NotionClient({
-        token: config.notionToken,
-        version: config.notionVersion,
-        apiBase: config.notionApiBase,
-      });
-      this._lottery = new Lottery({ store: this.store, notion, config });
-    }
-    return this._lottery;
+    return (this._lottery ??= new Lottery({ store: this.store, config: loadConfig(this.env) }));
   }
 
-  async check() {
-    const { round, drew, error } = await this.lottery().check();
-    return { round: round.id, status: round.status, drew, error: error ?? null };
+  auth() {
+    return (this._auth ??= new AdminAuth({ store: this.store, password: adminPassword(this.env) }));
   }
 
-  async publicStatus() {
-    const lottery = this.lottery();
-    const round = lottery.ensureRound();
-    const stale = !round.checkedAt || Date.now() - round.checkedAt > REFRESH_AFTER_MS;
-    if (round.status !== 'Completed' && stale) {
-      // Wait briefly for a fresh check so the page feels instant, but never
-      // hold the page hostage to a slow Notion API.
-      const run = lottery.check().catch(() => {});
-      this.ctx.waitUntil(run);
-      await Promise.race([run, new Promise((r) => setTimeout(r, 4000))]);
-    } else if (round.status === 'Completed' && !round.notionSynced) {
-      this.ctx.waitUntil(lottery.check().catch(() => {}));
-    }
-    return lottery.publicStatus();
+  publicStatus() {
+    return respond(() => this.lottery().publicStatus());
   }
 
-  adminStatus() {
-    return this.lottery().adminStatus();
+  submit(body, clientKey) {
+    return respond(() => {
+      if (this.store.hit(`submit:${clientKey}`, Date.now(), HOUR) > SUBMIT_LIMIT) {
+        throw new LotteryError('Too many submissions from this device. Please try again later.', 429);
+      }
+      const s = this.lottery().submit({ name: body?.name, title: body?.title });
+      return { ok: true, member: s.member };
+    });
   }
 
-  startNewRound() {
-    return this.lottery().startNewRound();
+  login(password, clientKey) {
+    return respond(async () => {
+      const result = await this.auth().login(password, clientKey);
+      if (!result.ok) throw new LotteryError(result.error, result.retryAfter ? 429 : 401);
+      return result;
+    });
+  }
+
+  admin(token, action, payload = {}) {
+    return respond(async () => {
+      if (!(await this.auth().verifySession(token))) throw new LotteryError('Please sign in again.', 401);
+      const lottery = this.lottery();
+      switch (action) {
+        case 'state':
+          break;
+        case 'add':
+          lottery.submit({ name: payload.name, title: payload.title }, 'admin');
+          break;
+        case 'edit':
+          lottery.editSubmission(payload.id, { name: payload.name, title: payload.title });
+          break;
+        case 'remove':
+          lottery.removeSubmission(payload.id);
+          break;
+        case 'restore':
+          lottery.restoreSubmission(payload.id);
+          break;
+        case 'draw':
+          lottery.draw();
+          break;
+        case 'new-round':
+          lottery.startNewRound();
+          break;
+        case 'export':
+          return lottery.export();
+        default:
+          throw new LotteryError('Unknown action.', 404);
+      }
+      return lottery.adminState();
+    });
   }
 }

@@ -1,249 +1,171 @@
-// The eight required scenarios from the project brief.
+// The required scenarios, for the admin-controlled draw.
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { LotteryError } from '../src/lottery.js';
 import { secureRandomInt } from '../src/random.js';
 import { LotteryStore } from '../src/store.js';
-import { FakeNotion } from './fake-notion.js';
 import { Clock, MEMBERS, MOVIES, makeLottery, nodeDb, submitAll, tempDbPath } from './helpers.js';
 
-const REVEAL = 20_000;
+const refused = (fn, pattern) => assert.throws(fn, (e) => e instanceof LotteryError && pattern.test(e.message));
 
-test('1: eight unique submissions do not select a winner', async () => {
-  const { lottery, api, store } = makeLottery();
-  submitAll(api, 8);
-  const r = await lottery.check();
-  assert.equal(r.drew, false);
+test('1: eight unique submissions: the draw button stays disabled and the draw is refused', () => {
+  const { lottery, store } = makeLottery();
+  submitAll(lottery, 8);
+  const admin = lottery.adminState();
+  assert.equal(admin.canDraw, false);
+  assert.equal(admin.readyCount, 8);
+  refused(() => lottery.draw(), /waiting for Elena/);
   assert.equal(store.currentRound().status, 'Open');
   const s = lottery.publicStatus();
   assert.equal(s.state, 'open');
   assert.equal(s.submittedCount, 8);
   assert.deepEqual(s.waitingFor, ['Elena']);
-  assert.equal(s.winner, undefined);
 });
 
-test('2: the ninth unique submission triggers the draw automatically', async () => {
-  const { lottery, api, store, clock } = makeLottery();
-  submitAll(api, 8);
-  await lottery.check();
-  api.submit('Elena', 'The Goonies');
-  const r = await lottery.check();
-  assert.equal(r.drew, true);
+test('2: the ninth unique submission enables the draw; one click picks and saves a winner', () => {
+  const { lottery, store, clock } = makeLottery();
+  submitAll(lottery, 9);
+  assert.equal(lottery.adminState().canDraw, true);
 
-  const round = store.currentRound();
-  assert.equal(round.status, 'Drawing');
+  // Nothing is drawn automatically.
+  const ready = lottery.publicStatus();
+  assert.equal(ready.state, 'ready');
+  assert.equal(ready.winner, undefined);
+  assert.equal(store.currentRound().status, 'Open');
+
+  clock.advance(5_000);
+  const round = lottery.draw();
+  assert.equal(round.status, 'Completed');
   assert.equal(round.entries.length, 9);
   assert.ok(MOVIES.includes(round.winnerTitle));
   assert.equal(MEMBERS[MOVIES.indexOf(round.winnerTitle)], round.winnerMember);
+  assert.equal(round.drawnAt, clock.now());
 
-  // While drawing, nothing about the winner is exposed or written to Notion.
-  const drawing = lottery.publicStatus();
-  assert.equal(drawing.state, 'drawing');
-  assert.equal(drawing.winner, undefined);
-  assert.equal(drawing.entries, undefined);
-  assert.equal(api.roundRows().length, 0);
-
-  clock.advance(REVEAL);
-  await lottery.check();
   const done = lottery.publicStatus();
   assert.equal(done.state, 'completed');
   assert.deepEqual(done.winner, { title: round.winnerTitle, member: round.winnerMember, drawnAt: round.drawnAt });
   assert.equal(done.entries.length, 9);
 
-  // Result mirrored to Notion: winner flagged and a Lottery Rounds row created.
-  assert.equal(api.submission(round.winnerPageId).status, 'Winner');
-  assert.deepEqual(api.roundRows(), [{ round: 'Movie Night #1', movie: round.winnerTitle, member: round.winnerMember }]);
-  assert.equal(store.currentRound().notionSynced, true);
+  // No second draw.
+  refused(() => lottery.draw(), /already been drawn/);
+  assert.equal(lottery.adminState().canDraw, false);
 });
 
-test('3: a duplicate submission does not start the lottery', async () => {
-  const { lottery, api, store, clock } = makeLottery();
-  submitAll(api, 7); // everyone but Diego and Elena
-  const first = api.submit('Maria', 'Frozen'); // Maria again
-  api.submit('Diego', 'Paddington 2');
-  // 9 rows, 8 distinct names, Elena missing.
-  const r = await lottery.check();
-  assert.equal(r.drew, false);
-  let s = lottery.publicStatus();
-  assert.equal(s.submittedCount, 7, 'Maria is not counted while she has two entries');
-  assert.deepEqual(s.needsAttention, ['Maria']);
-  assert.deepEqual(s.waitingFor, ['Elena']);
-  assert.equal(api.submission(first).status, 'Duplicate');
+test('3: a duplicate submission keeps the draw disabled until the admin removes the extra', () => {
+  const { lottery, store } = makeLottery();
+  submitAll(lottery, 7);
+  const extra = lottery.submit({ name: 'Maria', title: 'Frozen' });
+  lottery.submit({ name: 'Diego', title: 'Paddington 2' });
+  // 9 submissions, 8 distinct names, Elena missing.
+  let admin = lottery.adminState();
+  assert.equal(admin.canDraw, false);
+  assert.equal(admin.members.find((m) => m.name === 'Maria').status, 'duplicate');
+  assert.equal(admin.members.find((m) => m.name === 'Maria').submissions.length, 2);
+  assert.deepEqual(lottery.publicStatus().needsAttention, ['Maria']);
 
-  // Even once Elena submits, Maria's conflict blocks the draw.
-  api.submit('Elena', 'The Goonies');
-  clock.advance(60_000);
-  assert.equal((await lottery.check()).drew, false);
-  assert.equal(store.currentRound().status, 'Open');
-  assert.equal(lottery.publicStatus().submittedCount, 8);
+  // Even with Elena in, Maria's duplicate blocks the draw.
+  lottery.submit({ name: 'Elena', title: 'The Goonies' });
+  assert.equal(lottery.adminState().canDraw, false);
+  refused(() => lottery.draw(), /duplicates for Maria/);
 
-  // Admin rejects the extra entry -> Maria counts -> draw on the next check.
-  api.setStatus(first, 'Rejected');
-  assert.equal((await lottery.check()).drew, true);
-  const round = store.currentRound();
+  lottery.removeSubmission(extra.id);
+  admin = lottery.adminState();
+  assert.equal(admin.canDraw, true);
+  assert.equal(admin.removed.length, 1);
+  const round = lottery.draw();
   assert.ok(!round.entries.some((e) => e.title === 'Frozen'));
   assert.equal(round.entries.find((e) => e.member === 'Maria').title, 'The Princess Bride');
-  assert.equal(api.submission(first).status, 'Rejected');
+  assert.equal(store.getRound(round.id).winnerTitle, round.winnerTitle);
 });
 
-test('4: concurrent processing selects and records exactly one winner', async () => {
+test('4: two simultaneous draws record exactly one winner', () => {
   const path = tempDbPath();
   const clock = new Clock();
-  const api = new FakeNotion({ now: clock.now });
-  const ids = submitAll(api, 9);
-  // Two independent "executions": separate DB connections, Notion clients,
-  // and random sources that would pick different winners.
-  const a = makeLottery({ api, clock, db: nodeDb(path), randomInt: () => 0 });
-  const b = makeLottery({ api, clock, db: nodeDb(path), randomInt: () => 8 });
-  a.lottery.ensureRound();
+  const a = makeLottery({ clock, db: nodeDb(path), randomInt: () => 0 });
+  const b = makeLottery({ clock, db: nodeDb(path), randomInt: () => 8 });
+  submitAll(a.lottery, 9);
+  assert.equal(b.lottery.adminState().canDraw, true, 'both connections see the same data');
 
-  const [ra1, rb1, ra2, rb2] = await Promise.all([a.lottery.check(), b.lottery.check(), a.lottery.check(), b.lottery.check()]);
-  assert.equal(ra1, ra2, 'overlapping checks in one process share a single run');
-  assert.equal(rb1, rb2);
-  assert.equal([ra1, rb1].filter((r) => r.drew).length, 1, 'exactly one execution drew');
-
-  const ra = a.store.currentRound();
-  const rb = b.store.currentRound();
-  assert.equal(ra.winnerTitle, rb.winnerTitle);
-  assert.equal(a.db.all('SELECT COUNT(*) AS n FROM rounds')[0].n, 1);
-
-  clock.advance(REVEAL);
-  await Promise.all([a.lottery.check(), b.lottery.check()]);
-  assert.equal(api.roundRows().length, 1, 'result written to Notion once');
-  assert.equal(ids.filter((id) => api.submission(id).status === 'Winner').length, 1);
+  const results = [a, b].map(({ lottery }) => {
+    try {
+      return lottery.draw();
+    } catch (e) {
+      return e;
+    }
+  });
+  assert.equal(results.filter((r) => r instanceof LotteryError).length, 1);
+  const winner = results.find((r) => !(r instanceof Error));
+  assert.equal(b.store.currentRound().winnerTitle, winner.winnerTitle);
+  assert.equal(a.store.currentRound().winnerTitle, winner.winnerTitle);
 });
 
-test('4b: the compare-and-set refuses a second draw for the same round', () => {
+test('4b: the compare-and-set refuses a second draw even if the open check is bypassed', () => {
   const store = new LotteryStore(nodeDb());
-  const round = store.startRound(0, Date.now());
-  const entries = MEMBERS.map((m, i) => ({ member: m, title: MOVIES[i], pageId: `p${i}` }));
-  assert.ok(store.recordDraw(round.id, { entries, winnerIndex: 2, drawnAt: 1, revealAt: 1 }));
-  assert.equal(store.recordDraw(round.id, { entries, winnerIndex: 5, drawnAt: 2, revealAt: 2 }), null);
+  const round = store.startRound(Date.now());
+  const entries = MEMBERS.map((m, i) => ({ member: m, title: MOVIES[i], submissionId: i + 1 }));
+  assert.ok(store.recordDraw(round.id, { entries, winnerIndex: 2, drawnAt: 1 }));
+  assert.equal(store.recordDraw(round.id, { entries, winnerIndex: 5, drawnAt: 2 }), null);
   assert.equal(store.getRound(round.id).winnerTitle, MOVIES[2]);
-  assert.equal(store.startRound(3), null, 'cannot start a round while one is unfinished');
+  assert.ok(store.startRound(3), 'a new round can start after the draw');
+  assert.equal(store.startRound(4), null, 'but not while one is open');
 });
 
-test('5: the winner survives a restart, even if Notion data changes afterwards', async () => {
+test('5: the winner survives a restart and can no longer be changed', () => {
   const path = tempDbPath();
   const clock = new Clock();
-  const api = new FakeNotion({ now: clock.now });
-  const ids = submitAll(api, 9);
-  const first = makeLottery({ api, clock, db: nodeDb(path) });
-  await first.lottery.check();
-  const before = first.store.currentRound();
+  const first = makeLottery({ clock, db: nodeDb(path) });
+  const subs = submitAll(first.lottery, 9);
+  const before = first.lottery.draw();
   first.db.close(); // "restart"
 
-  // After restart: someone edits titles and submits again.
-  for (const id of ids) api.setTitle(id, 'Changed After Draw');
-  api.submit('Maria', 'Sneaky Second Pick');
-  clock.advance(REVEAL);
-
-  const second = makeLottery({ api, clock, db: nodeDb(path) });
-  await second.lottery.check();
-  await second.lottery.check();
+  const second = makeLottery({ clock, db: nodeDb(path) });
   const after = second.store.currentRound();
   assert.equal(after.id, before.id);
-  assert.equal(after.status, 'Completed');
   assert.equal(after.winnerTitle, before.winnerTitle);
-  assert.equal(after.winnerMember, before.winnerMember);
   assert.deepEqual(after.entries, before.entries);
+  refused(() => second.lottery.draw(), /already been drawn/);
+  refused(() => second.lottery.submit({ name: 'Maria', title: 'Sneaky' }), /already been drawn/);
+  refused(() => second.lottery.editSubmission(subs[0].id, { title: 'Changed' }), /can no longer be changed/);
+  refused(() => second.lottery.removeSubmission(subs[0].id), /can no longer be changed/);
   assert.equal(second.lottery.publicStatus().winner.title, before.winnerTitle);
 });
 
-test('6: a new round resets progress and excludes old submissions', async () => {
-  const { lottery, api, store, clock } = makeLottery();
-  const oldIds = submitAll(api, 9);
-  await lottery.check();
-  clock.advance(REVEAL);
-  await lottery.check();
-  const old = store.currentRound();
-  assert.equal(old.status, 'Completed');
+test('6: a new round resets progress and excludes old submissions', () => {
+  const { lottery, store, clock } = makeLottery();
+  refused(() => lottery.startNewRound(), /hasn't been drawn/);
+  submitAll(lottery, 9);
+  const old = lottery.draw();
 
-  // A late submission arrives after the draw but before the new round.
-  clock.advance(5 * 60_000);
-  const late = api.submit('John', 'Too Late Movie');
-  clock.advance(5 * 60_000);
-
-  const started = lottery.startNewRound();
-  assert.equal(started.ok, true);
-  assert.equal(started.round.number, 2);
+  clock.advance(7 * 24 * 3600_000);
+  const round = lottery.startNewRound();
+  assert.equal(round.number, 2);
   let s = lottery.publicStatus();
   assert.equal(s.state, 'open');
   assert.equal(s.submittedCount, 0);
   assert.equal(s.round.label, 'Movie Night #2');
   assert.equal(s.history[0].title, old.winnerTitle);
+  assert.ok(lottery.adminState().members.every((m) => m.status === 'missing' && m.submissions.length === 0));
 
-  await lottery.check();
-  s = lottery.publicStatus();
-  assert.equal(s.submittedCount, 0, 'old and late submissions are excluded');
-  assert.equal(api.submission(late).status, 'Late');
-  for (const id of oldIds) assert.equal(api.submission(id).round, old.id);
-
-  clock.advance(60_000);
-  submitAll(api, 3);
-  await lottery.check();
+  submitAll(lottery, 3);
   assert.equal(lottery.publicStatus().submittedCount, 3);
   assert.equal(store.getRound(old.id).winnerTitle, old.winnerTitle, 'previous winner unchanged');
-
-  // Starting yet another round while this one is open is refused.
-  assert.equal(lottery.startNewRound().ok, false);
+  refused(() => lottery.startNewRound(), /hasn't been drawn/);
 });
 
-test('7: temporary Notion failures are retried safely', async (t) => {
-  await t.test('transient errors within the retry budget: the draw still happens', async () => {
-    const { lottery, api } = makeLottery();
-    submitAll(api, 9);
-    api.failNext(2, 503);
-    api.failNext(1, 'network');
-    assert.equal((await lottery.check()).drew, true);
-  });
-
-  await t.test('a sustained outage: no draw, error recorded, recovers later', async () => {
-    const { lottery, api, store } = makeLottery({ retries: 2 });
-    submitAll(api, 9);
-    api.failNext(3, 503); // 1 try + 2 retries
-    const r = await lottery.check();
-    assert.equal(r.drew, false);
-    assert.match(r.error, /503/);
-    assert.equal(store.currentRound().status, 'Open');
-    assert.equal(store.currentRound().winnerTitle, null);
-    assert.equal(lottery.publicStatus().notionError, true);
-
-    assert.equal((await lottery.check()).drew, true);
-    assert.equal(lottery.publicStatus().state, 'drawing');
-  });
-
-  await t.test('failure on a later results page never draws from partial data', async () => {
-    const clock = new Clock();
-    const api = new FakeNotion({ now: clock.now, pageSize: 4 });
-    const { lottery, store } = makeLottery({ api, clock, retries: 1 });
-    submitAll(api, 9);
-    // Page 1 of the query succeeds; page 2 fails (twice, exhausting the retry).
-    const queries = () => api.requests.filter((r) => r.path.endsWith('/query')).length;
-    api.failNext(2, 500, (method, path) => path.endsWith('/query') && queries() >= 2);
-    assert.equal((await lottery.check()).drew, false);
-    assert.equal(store.currentRound().status, 'Open');
-    assert.equal((await lottery.check()).drew, true);
-    assert.equal(store.currentRound().entries.length, 9);
-  });
-
-  await t.test('failures while writing results are retried without changing the winner', async () => {
-    const { lottery, api, store, clock } = makeLottery();
-    submitAll(api, 9);
-    await lottery.check();
-    const winner = store.currentRound().winnerTitle;
-    clock.advance(REVEAL);
-    api.failNext(4, 503, (method) => method !== 'GET'); // one write exhausts its retries
-    await lottery.check();
-    assert.equal(store.currentRound().notionSynced, false);
-    await lottery.check();
-    assert.equal(store.currentRound().notionSynced, true);
-    assert.equal(store.currentRound().winnerTitle, winner);
-    assert.equal(api.roundRows().length, 1);
-  });
+test('7: invalid input is rejected and never counts', () => {
+  const { lottery } = makeLottery();
+  refused(() => lottery.submit({ name: 'Stranger', title: 'Cars' }), /choose your name/);
+  refused(() => lottery.submit({ name: '', title: 'Cars' }), /choose your name/);
+  refused(() => lottery.submit({ name: 'Maria', title: '   ' }), /enter a movie title/);
+  refused(() => lottery.submit({ name: 'Maria', title: 'x'.repeat(121) }), /at most 120/);
+  const s = lottery.submit({ name: '  maria ', title: '  The   Princess Bride ' });
+  assert.equal(s.member, 'Maria', 'names are matched case-insensitively');
+  assert.equal(s.title, 'The Princess Bride', 'whitespace is tidied');
+  assert.equal(lottery.publicStatus().submittedCount, 1);
 });
 
-test('8: fairness — every movie has an equal 1-in-9 chance', async (t) => {
+test('8: fairness: every movie has an equal 1-in-9 chance', async (t) => {
   await t.test('rejection sampling gives each outcome exactly the same number of inputs', () => {
     const n = 9;
     const limit = 2 ** 32 - (2 ** 32 % n);
@@ -266,14 +188,14 @@ test('8: fairness — every movie has an equal 1-in-9 chance', async (t) => {
     for (const c of counts) assert.ok(Math.abs(c / N - 1 / 9) < 0.005, `share ${(c / N).toFixed(4)}`);
   });
 
-  await t.test('end-to-end rounds spread wins across all nine submissions', async () => {
+  await t.test('end-to-end rounds spread wins across all nine submissions', () => {
     const wins = new Map(MOVIES.map((m) => [m, 0]));
     const rounds = 1800;
     for (let i = 0; i < rounds; i++) {
-      const { lottery, api, store } = makeLottery();
-      submitAll(api, 9);
-      await lottery.check();
-      wins.set(store.currentRound().winnerTitle, wins.get(store.currentRound().winnerTitle) + 1);
+      const { lottery } = makeLottery();
+      submitAll(lottery, 9);
+      const r = lottery.draw();
+      wins.set(r.winnerTitle, wins.get(r.winnerTitle) + 1);
     }
     const expected = rounds / 9;
     const chi2 = [...wins.values()].reduce((s, c) => s + (c - expected) ** 2 / expected, 0);

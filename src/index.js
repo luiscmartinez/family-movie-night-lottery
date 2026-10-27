@@ -1,7 +1,7 @@
-// Cloudflare Worker entry point: serves the pages, the JSON API and the cron check.
+// Cloudflare Worker entry point: serves the pages and the JSON API.
+// There are no scheduled jobs; nothing happens unless someone clicks.
 
-import { ConfigError, loadConfig } from './config.js';
-import { isAdmin } from './auth.js';
+import { cookieValue, SESSION_COOKIE } from './auth.js';
 import { adminPage, mainPage } from './ui.js';
 
 export { LotteryDO } from './lottery-do.js';
@@ -12,12 +12,13 @@ const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'X-Frame-Options': 'DENY',
+  'Strict-Transport-Security': 'max-age=31536000',
 };
 
-function json(data, status = 200) {
+function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...SECURITY_HEADERS },
+    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...SECURITY_HEADERS, ...headers },
   });
 }
 
@@ -27,6 +28,40 @@ function html(body) {
   });
 }
 
+const reply = ({ status, body }, headers) => json(body, status, headers);
+
+// Anonymous per-visitor key for rate limiting; the raw IP is never stored.
+async function clientKey(request) {
+  const ip = request.headers.get('CF-Connecting-IP') ?? 'local';
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`fmnl:${ip}`));
+  return [...new Uint8Array(digest).slice(0, 12)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// State-changing requests must be same-origin JSON. Browsers can't send a
+// cross-site JSON POST without a CORS preflight, which this Worker never
+// grants; together with the SameSite=Strict cookie this blocks CSRF.
+function sameOriginJson(request) {
+  const origin = request.headers.get('Origin');
+  if (origin && origin !== new URL(request.url).origin) return false;
+  return (request.headers.get('Content-Type') ?? '').startsWith('application/json');
+}
+
+async function readJson(request) {
+  const text = await request.text();
+  if (text.length > 4096) return null;
+  try {
+    return JSON.parse(text || '{}');
+  } catch {
+    return null;
+  }
+}
+
+function sessionCookie(token, maxAge) {
+  return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
+}
+
+const ADMIN_ACTIONS = new Set(['add', 'edit', 'remove', 'restore', 'draw', 'new-round']);
+
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
@@ -35,39 +70,47 @@ export default {
     try {
       if (method === 'GET' && pathname === '/') return html(mainPage());
       if (method === 'GET' && pathname === '/admin') return html(adminPage());
+      if (method === 'GET' && pathname === '/api/status') return reply(await lottery(env).publicStatus());
 
-      if (pathname.startsWith('/api/')) {
-        loadConfig(env); // fail fast with a readable message if misconfigured
+      if (method === 'POST' && pathname.startsWith('/api/')) {
+        if (!sameOriginJson(request)) return json({ error: 'Bad request.' }, 400);
+        const body = await readJson(request);
+        if (!body) return json({ error: 'Bad request.' }, 400);
 
-        if (method === 'GET' && pathname === '/api/status') return json(await lottery(env).publicStatus());
-
-        if (pathname.startsWith('/api/admin/')) {
-          if (!(await isAdmin(request, env))) return json({ error: 'Unauthorized' }, 401);
-          if (method === 'GET' && pathname === '/api/admin/status') return json(await lottery(env).adminStatus());
-          if (method === 'POST' && pathname === '/api/admin/check') {
-            await lottery(env).check();
-            return json(await lottery(env).adminStatus());
-          }
-          if (method === 'POST' && pathname === '/api/admin/new-round') {
-            const result = await lottery(env).startNewRound();
-            return json(result, result.ok ? 200 : 409);
-          }
+        if (pathname === '/api/submit') {
+          // Honeypot: a hidden field real people never fill in.
+          if (body.website) return json({ ok: true });
+          return reply(await lottery(env).submit(body, await clientKey(request)));
+        }
+        if (pathname === '/api/admin/login') {
+          const result = await lottery(env).login(body.password, await clientKey(request));
+          if (result.status !== 200) return reply(result);
+          return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie(result.body.token, result.body.maxAge) });
+        }
+        if (pathname === '/api/admin/logout') {
+          return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie('', 0) });
+        }
+        const action = pathname.slice('/api/admin/'.length);
+        if (pathname.startsWith('/api/admin/') && ADMIN_ACTIONS.has(action)) {
+          const token = cookieValue(request.headers.get('Cookie'));
+          return reply(await lottery(env).admin(token, action, body));
         }
       }
+
+      if (method === 'GET' && (pathname === '/api/admin/state' || pathname === '/api/admin/export')) {
+        const token = cookieValue(request.headers.get('Cookie'));
+        const result = await lottery(env).admin(token, pathname.slice('/api/admin/'.length));
+        const headers =
+          pathname.endsWith('/export') && result.status === 200
+            ? { 'Content-Disposition': `attachment; filename="movie-night-backup-${new Date().toISOString().slice(0, 10)}.json"` }
+            : {};
+        return reply(result, headers);
+      }
+
       return json({ error: 'Not found' }, 404);
     } catch (e) {
-      if (e instanceof ConfigError) return json({ error: `Setup needed: ${e.message}` }, 503);
       console.error(e);
-      return json({ error: 'Something went wrong. Please try again in a minute.' }, 500);
+      return json({ error: 'Something went wrong. Please try again.' }, 500);
     }
-  },
-
-  // Cron trigger (every minute): the automatic check that draws the winner.
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      lottery(env)
-        .check()
-        .then((r) => r.drew && console.log(`Winner drawn for ${r.round}`)),
-    );
   },
 };

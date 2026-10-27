@@ -2,325 +2,211 @@
 
 Everyone picks a movie. One movie wins. Let fate decide what we're watching!
 
-Nine family members each submit one movie through a **Notion Form**. When the ninth valid submission arrives, a small **Cloudflare Worker** draws the winner automatically, using a cryptographically secure random number. The winner is posted on a cozy, mobile-friendly results page that anyone with the link can open. No sign-in, no app, and nothing to pay.
+Nine family members each submit one movie on the website. No accounts, no app. The organizer reviews the picks on a password-protected `/admin` dashboard, fixes any mistakes, and presses **Draw Winning Movie**. A cryptographically secure, unbiased random draw picks one of the nine movies. The result is saved permanently and shown on the main page.
 
-| Accepting submissions | Drawing | Winner |
-| --- | --- | --- |
-| ![Open](docs/screenshots/open.png) | ![Drawing](docs/screenshots/drawing.png) | ![Winner](docs/screenshots/completed.png) |
+It runs on a single **Cloudflare Worker** with a **SQLite-backed Durable Object** for storage, all on the Workers Free plan. **Workers Builds** deploys it from GitHub on every push.
+
+| Accepting submissions | All movies in | Winner | Admin dashboard |
+| --- | --- | --- | --- |
+| ![Open](docs/screenshots/open.png) | ![Ready](docs/screenshots/ready.png) | ![Winner](docs/screenshots/completed.png) | ![Admin](docs/screenshots/admin.png) |
 
 ---
 
 ## Contents
 
 1. [How it works](#1-how-it-works)
-2. [Why this architecture](#2-why-this-architecture)
-3. [Notion Forms: limits and how we handle them](#3-notion-forms-limits-and-how-we-handle-them)
-4. [Setup: Notion databases](#4-setup-notion-databases)
-5. [Setup: the Notion Form](#5-setup-the-notion-form)
-6. [Setup: the Notion integration (API token)](#6-setup-the-notion-integration-api-token)
-7. [Configuration](#7-configuration)
-8. [Deployment](#8-deployment)
-9. [Administrator guide](#9-administrator-guide)
-10. [Changing the nine family members](#10-changing-the-nine-family-members)
-11. [Testing](#11-testing)
-12. [Security and privacy](#12-security-and-privacy)
-13. [Free-tier budget](#13-free-tier-budget)
-14. [Project layout](#14-project-layout)
+2. [Deploy from GitHub with Workers Builds](#2-deploy-from-github-with-workers-builds)
+3. [Configuration](#3-configuration)
+4. [Administrator guide](#4-administrator-guide)
+5. [Changing the nine family members](#5-changing-the-nine-family-members)
+6. [Security and privacy](#6-security-and-privacy)
+7. [Testing](#7-testing)
+8. [Local development](#8-local-development)
+9. [Free-tier budget](#9-free-tier-budget)
+10. [Project layout](#10-project-layout)
 
 ---
 
 ## 1. How it works
 
 ```
- Family member's phone                         Cloudflare (free plan)
- ─────────────────────                         ────────────────────────────────────────────────
-  "Submit Your Movie" ──► Notion Form           Worker  (src/index.js)
-                              │                  ├─ GET /            results page (HTML)
-                              ▼                  ├─ GET /api/status  public JSON (no titles until the reveal)
-                     ┌───────────────────┐       ├─ /admin, /api/admin/*  token-protected
-                     │ Notion database   │       └─ cron "* * * * *" ─┐
-                     │ "Movie Submissions"│◄──── Notion API ──────────┤
-                     └───────────────────┘   (read rows, write Status)│
-                     ┌───────────────────┐                            ▼
-                     │ Notion database   │◄──── result row ──  Durable Object (src/lottery-do.js)
-                     │ "Lottery Rounds"  │                     SQLite: rounds, winner, progress
-                     └───────────────────┘                     ← single source of truth
+ Family member's phone                 Cloudflare Worker (free plan)
+ ─────────────────────                 ───────────────────────────────────────────────
+  Main page  "/"                        GET  /api/status       public, no titles until the draw
+   ├─ progress + who's in               POST /api/submit       { name, title }
+   └─ form: Your Name, Movie Title ──►        │
+                                              ▼
+ Organizer                              Durable Object (one instance, SQLite)
+ ─────────                               rounds · submissions · counters
+  /admin (password) ─────────────────►  POST /api/admin/{login, add, edit, remove,
+   ├─ all 9 members + their picks                          restore, draw, new-round}
+   ├─ duplicates highlighted            GET  /api/admin/{state, export}
+   ├─ edit / remove / restore / add
+   ├─ 🎲 Draw Winning Movie (enabled only when ready)
+   └─ Start New Round
 ```
 
-**How the form and the lottery communicate.** They don't talk to each other directly. The Notion Form writes each response as a new row in the *Movie Submissions* database. The Worker reads that database through the Notion API:
+Nothing runs on a schedule. There's no polling and no automatic draw. The Worker only does anything when someone loads a page or clicks a button.
 
-* **Every minute**, a Cloudflare cron trigger runs a check.
-* **When someone opens the results page**, the page also starts a check, at most one every 15 seconds. If the family is watching, the ninth submission shows up within seconds.
+**Round lifecycle:** `Open` → (admin clicks Draw) → `Completed` → (admin clicks Start New Round) → a new `Open` round.
 
-Each check:
+**Who counts:** a family member counts only when they have **exactly one** active submission in the current round.
 
-1. Loads the current round from the Durable Object's SQLite storage.
-2. Queries Notion for rows in this round, plus new rows not yet assigned to any round.
-3. Works out who counts, using the duplicate rules below.
-4. If all nine members count, it **draws immediately**. It writes the winner with one atomic compare-and-set (`UPDATE … WHERE status = 'Open' RETURNING`). Only the first writer can succeed, so the lottery runs exactly once per round.
-5. Writes bookkeeping back to Notion: the `Round` and `Status` of each row.
+* If someone submits twice, both entries are shown on the dashboard as **Duplicate** and that person doesn't count. The admin removes the extra one, and can restore it later.
+* The **Draw Winning Movie** button is enabled only when all nine members have exactly one active submission. The server checks this again when the button is pressed.
 
-**Expected delay:** at most about 1 minute after the ninth valid submission, or a few seconds if someone has the page open. The page then shows *"All movies are in! Drawing our winner…"* for 20 seconds (configurable) before the reveal. The winner is already fixed and stored at that point. The API simply doesn't reveal it until the countdown ends.
+**The draw:**
+* One click picks one of the nine submissions using `crypto.getRandomValues` with rejection sampling, so every movie has exactly a 1/9 chance.
+* The winner is written with a single compare-and-set update (`UPDATE rounds … WHERE status = 'Open' RETURNING`). Only the first request can draw, so double-clicks and two admins clicking at once still give one winner.
+* After the draw, the round's submissions can't be changed and new submissions are refused.
 
-**Round states:** `Open` → `Drawing` (winner stored, not yet shown) → `Completed` (winner shown and copied to Notion).
+**What the public sees:**
+* While the round is open: how many people have submitted and who's still missing. Movie titles stay secret.
+* Once everyone has a valid pick: "All movies are in! Waiting for the organizer to draw our winner…"
+* After the draw: the winning movie, who submitted it, the date, and all nine picks.
 
-## 2. Why this architecture
+## 2. Deploy from GitHub with Workers Builds
 
-I compared the options against current pricing and limits (October 2026):
+You need a free Cloudflare account. No credit card is needed for the Workers Free plan.
 
-| | **Cloudflare Worker + cron + Durable Object** ✅ | GitHub Actions (scheduled) | Notion webhooks |
+1. **Fork or push this repository to GitHub.**
+2. In the Cloudflare dashboard, go to **Workers & Pages → Create → Import a repository** and connect your GitHub account. Choose this repository.
+3. Use these build settings:
+
+   | Setting | Value |
+   |---|---|
+   | Project / Worker name | `family-movie-night-lottery` (must match `name` in `wrangler.toml`) |
+   | Production branch | your default branch (for example `master` or `main`) |
+   | Build command | *(leave empty)* |
+   | Deploy command | `npx wrangler deploy` (the default) |
+   | Root directory | `/` |
+
+4. **Save and Deploy.** The first build creates the Worker and its Durable Object. Opening the site at this point shows a "Setup needed" message until step 5 is done.
+5. Go to **Worker → Settings → Variables and Secrets** and add:
+
+   | Name | Type | Value |
+   |---|---|---|
+   | `FAMILY_MEMBERS` | Text | Exactly 9 comma-separated names, for example `Maria,John,Grandma Rose,…` |
+   | `ADMIN_PASSWORD` | **Secret** | A long passphrase (12+ characters), for example four random words |
+
+   Saving these applies them right away. No redeploy is needed.
+6. Open `https://family-movie-night-lottery.<your-subdomain>.workers.dev`. That's the link to share with the family. Your dashboard is `/admin`.
+
+From now on, every push to the production branch redeploys automatically. Cloudflare doesn't generate preview URLs for Workers that use Durable Objects, so you can switch off *Builds for non-production branches* under **Settings → Build**. Your data lives in the Durable Object and survives every redeploy. `wrangler.toml` sets `keep_vars = true`, so deploys never erase the dashboard variables.
+
+> **Why the names aren't in `wrangler.toml`:** this repository is public. Keeping `FAMILY_MEMBERS` and the password in the dashboard keeps them out of git.
+
+GitHub Actions (`.github/workflows/test.yml`) runs the tests and a dry-run build on every push and pull request.
+
+## 3. Configuration
+
+| Name | Where | Required | Purpose |
 |---|---|---|---|
-| **Cost** | Free plan: 100k requests/day, 5 cron triggers, SQLite Durable Objects | Free for public repos (private repos: 2,000 min/month) | Free, but they still need a server to receive them |
-| **Reliability** | Cron every minute; storage is transactional | Schedules are often delayed or dropped under load. **Turned off after 60 days without repo activity.** | Events are aggregated and may be delayed. You still need a fallback poll. |
-| **Complexity** | One deploy. Pages, API, cron and state live in one place. | Still needs a separate state store (no locking) and separate hosting for the page | Public endpoint, verification handshake and signature checks, plus everything in the first column |
-| **Maintenance** | None | Re-enable the workflow every 60 days | Re-verify the subscription when anything changes |
-| **Detection speed** | ≤ 1 min (seconds while the page is open) | Minimum interval 5 min, often 10–30 min in practice | Usually under 1 min (`page.created` is batched) |
-| **Free-tier limits** | 10 ms CPU per request; 50 outbound requests per invocation (we cap writes at 25 per check) | Minute quota; inactivity shutdown | Rate limit of about 3 requests/s for the API calls that follow each event |
+| `FAMILY_MEMBERS` | Dashboard variable (or `.dev.vars` locally) | ✅ | Exactly 9 unique, comma-separated names. Shown in the form's name dropdown. |
+| `ADMIN_PASSWORD` | Dashboard **secret** (or `.dev.vars` locally) | ✅ for `/admin` | The admin password, at least 12 characters. The public page works without it, but `/admin` stays locked until it's set. |
 
-**Decision:** One Cloudflare Worker gives the fastest detection that is still free, real locking, and a single free host for the page. Webhooks wouldn't make detection meaningfully faster than per-minute polling plus checks on page view, and they'd add a public endpoint to secure. They could be added later as an extra trigger for the same `check()`.
+There's nothing else to configure: no API keys and no external services.
 
-**Why a Durable Object as well as Notion?** Notion has no transactions or locks. The Durable Object is a single instance with transactional SQLite storage, which gives us:
+## 4. Administrator guide
 
-* a winner recorded exactly once, through the atomic compare-and-set;
-* a winner that can't change, because it's stored with a snapshot of all nine entries;
-* storage that survives restarts and redeploys.
+Open **`/admin`** and sign in with `ADMIN_PASSWORD`. You stay signed in on that browser for 12 hours.
 
-Notion is only the input (submissions) and an output mirror (results).
+**While people are submitting** (it can take a couple of days):
+* Every family member is listed with a badge: **✓ Ready**, **! Duplicate** or **Not yet**, plus their submissions and when they were sent.
+* **Edit** fixes a typo in a movie title.
+* **Remove** takes out an extra or wrong entry. Removed entries are listed under *Removed*, where you can **Restore** them.
+* **+ Add a movie for …** enters a pick for someone who told you in person.
+* If someone picked the wrong name, remove that entry and add it again under the right name.
 
-## 3. Notion Forms: limits and how we handle them
+**Drawing the winner:** when every member shows ✓ Ready, the **🎲 Draw Winning Movie** button turns on. Click it and confirm. The winner appears on the main page straight away. It's permanent and can't be redrawn.
 
-| Limitation | What we do |
-|---|---|
-| Public forms **don't verify who is submitting**. Picking "Maria" doesn't prove it's Maria. | The duplicate rule below. Two entries for the same name never count, so a mistake or a prank can't start the lottery. The admin decides. |
-| You can't limit a public form to one response per person | Same rule: extra entries are flagged `Duplicate` until the admin resolves them |
-| No custom HTML, CSS or JavaScript, so a form can't show progress | Progress and results live on the Worker's page. The form stays a plain, minimal Notion form. |
-| No hidden or pre-filled fields, so the form can't record which round an entry belongs to | The Worker stamps each new row with the current round ID. Rows created before the round started are marked `Late`. |
-| `created_time` is rounded down to the minute | A row counts for a round if it was created in the same minute the round started, or later |
+**Next movie night:** click **Start New Round**. Progress resets to 0 of 9 and the previous winner moves to *Past winners*. Share the same link again.
 
-### Duplicate and conflict rule
+**Backups:** **Download backup** saves every round and submission as JSON.
 
-> A family member counts **only when they have exactly one submission in the current round that is not `Rejected`.**
+## 5. Changing the nine family members
 
-* Maria submits *The Princess Bride*, then *Jurassic Park*. Both rows are marked `Duplicate`, and Maria shows as "needs attention". She doesn't count, so with eight others in, the lottery **doesn't** start.
-* The admin sets `Status = Rejected` on the row that shouldn't count, or deletes it. On the next check the other row becomes `Counted`.
-* The lottery starts only when nine **different** members each have exactly one counted movie.
+1. In the Cloudflare dashboard, edit the `FAMILY_MEMBERS` variable. There must be exactly nine names, with no duplicates.
+2. Save. The change takes effect immediately.
 
-Status values the Worker writes in Notion:
+It's best to change names between rounds. If you rename someone mid-round, their earlier entry appears on the dashboard under *Other names* and doesn't count. Add their movie again under the new name.
 
-| Status | Meaning |
-|---|---|
-| `Counted` | This member's single valid pick for the round |
-| `Duplicate` | This member has more than one entry; the admin must reject the extras |
-| `Needs review` | The name isn't one of the nine, or the title is blank. It doesn't count. |
-| `Rejected` | Set **by the admin**. The lottery ignores it and never overwrites it. |
-| `Late` | Arrived between a draw and the next round. It isn't counted in any round. |
-| `Winner` | The drawn movie |
+## 6. Security and privacy
 
-Two family members picking the same movie is allowed. Each submission is one ticket.
+* **The admin password is a Cloudflare secret.** It's never in the repository, the page or the browser. It's compared in constant time.
+* **Signing in issues a session cookie** (`__Host-fmnl_admin`) with these protections:
+  * The page's JavaScript can't read it (`HttpOnly`), it's only sent over HTTPS (`Secure`), and other sites can't send it (`SameSite=Strict`).
+  * It's signed with HMAC-SHA-256 and expires after 12 hours.
+  * The signing key mixes the password with a random per-installation secret, so changing the password signs out every session.
+* **Login lockout:** 5 wrong passwords lock that visitor out for 15 minutes. Visitors are identified by a one-way hash of their IP; raw IPs are never stored.
+* **CSRF:** every state-changing request must be a same-origin JSON `POST`. Browsers can't send those across sites without a CORS preflight, and the Worker never grants one.
+* **Spam:** the form has a hidden honeypot field, and each visitor can submit at most 10 times per hour.
+* **Privacy:** movie titles aren't public until the draw. Before that, the main page shows only first names and counts.
+* **Hardening:** everything rendered on the pages is HTML-escaped. Responses send `nosniff`, `no-referrer`, `X-Frame-Options: DENY` and HSTS.
+* **Not protected (by design):** anyone with the link can submit under any family member's name. The duplicate rule and your review before drawing are the safeguard.
+* **Optional upgrade:** with a custom domain, you can also put `/admin` behind **Cloudflare Access** (free for up to 50 users) for email one-time-code login on top of the password. On the shared `workers.dev` hostname, Access would protect the whole Worker, including the public page.
 
-## 4. Setup: Notion databases
-
-Create a page called **Family Movie Night** (it can stay private). Inside it, create two databases. Property names must match exactly.
-
-### Movie Submissions (required)
-
-| Property | Type | Notes |
-|---|---|---|
-| `Movie Title` | Title | The default "Name" column, renamed |
-| `Your Name` | Select | One option per family member, exactly matching `FAMILY_MEMBERS` |
-| `Round` | Text | Filled in by the lottery. Leave it out of the form. |
-| `Status` | Select | Options: `Counted`, `Duplicate`, `Needs review`, `Rejected`, `Late`, `Winner`. Leave it out of the form. |
-
-> The API creates missing `Status` options automatically, but adding them yourself lets you pick colors. Suggested: Rejected = red, Duplicate = orange, Winner = yellow.
-
-### Lottery Rounds (optional, recommended)
-
-A permanent history of winners, filled in automatically after each draw.
-
-| Property | Type |
-|---|---|
-| `Round` | Title |
-| `Winning Movie` | Text |
-| `Submitted By` | Text |
-| `Lottery Date` | Date |
-
-You can publish this database to the web (Share → Publish) as a second results page. It only ever contains completed rounds.
-
-## 5. Setup: the Notion Form
-
-1. Open **Movie Submissions** → **+ Add view** (or the `+` next to the views) → **Form**.
-2. Title it *"Family Movie Night: pick your movie! 🍿"*.
-3. Keep exactly two questions:
-   * **Your Name** → property `Your Name`, **Required** ✅
-   * **Movie Title** → property `Movie Title`, **Required** ✅
-4. Don't add `Round` or `Status` to the form.
-5. **Share form** → set access to **Anyone with the link** (people outside your workspace, no Notion account needed). Copy the link.
-6. Paste the link into `NOTION_FORM_URL` in `wrangler.toml`.
-
-**Reusing the same form every round is safe.** The form only creates rows. The Worker gives every new row the current round's ID. Rows from older rounds keep their own round ID and are never queried again. Anything submitted between a draw and the next round is marked `Late`. The form link never changes, and you can share the same link every movie night. You can also toggle the form's *Accepting responses* setting off between movie nights. That's optional.
-
-## 6. Setup: the Notion integration (API token)
-
-1. Go to <https://www.notion.so/profile/integrations> → **New integration**.
-2. Type: **Internal**. Name: *Movie Night Lottery*. Pick your workspace.
-3. **Capabilities:** *Read content* ✅, *Update content* ✅, *Insert content* ✅ (insert is needed for the Lottery Rounds rows). User information: **No user information**.
-4. Copy the **Internal Integration Secret**. This is `NOTION_TOKEN`.
-5. Give the integration access to **only** the two databases. On each one: **•••** → **Connections** → add *Movie Night Lottery*. Don't connect it to the whole workspace or to unrelated pages.
-6. Copy each database's ID. Open the database as a full page and copy its link. The 32-character ID is part of it, and you can paste the whole URL into the config.
-
-Check everything with:
+## 7. Testing
 
 ```bash
 npm install
-echo "NOTION_TOKEN=ntn_your_secret" > .dev.vars
-npm run notion:check                    # verifies access and property names/types
-npm run notion:check -- --sync-members  # adds any missing family names to "Your Name"
+npm test          # unit + scenario tests (node:test, no extra dependencies)
+npm run check     # tests + a dry-run Worker build (what CI runs)
 ```
 
-The Worker uses Notion API version `2026-03-11`: data-source queries, and pages created with a `data_source_id` parent. Database IDs are resolved to their data source automatically.
+The tests run the real lottery code on `node:sqlite`, the same SQL as the Durable Object.
 
-## 7. Configuration
-
-Public, non-secret settings go in `wrangler.toml` under `[vars]`:
-
-| Variable | Example | Purpose |
+| Scenario | Expected | Test |
 |---|---|---|
-| `FAMILY_MEMBERS` | `Maria,John,Grandma Rose,…` | **Exactly 9** comma-separated names (validated) |
-| `NOTION_FORM_URL` | `https://yourname.notion.site/…` | Opened by the "Submit Your Movie" button |
-| `NOTION_SUBMISSIONS_DB` | ID or URL | The database the form writes to |
-| `NOTION_ROUNDS_DB` | ID or URL | Optional results database |
-| `REVEAL_DELAY_SECONDS` | `20` | How long the "Drawing our winner…" screen shows |
-| `NOTION_VERSION` | `2026-03-11` | Optional override of the Notion API version |
+| 1. Eight submissions | Draw button disabled; a draw request is refused | `scenarios.test.js` › 1 |
+| 2. Ninth submission | Draw enabled; nothing is drawn automatically; one click saves a winner; a second draw is refused | › 2 |
+| 3. Duplicate, plus one member missing | Draw stays disabled until the admin removes the extra | › 3 |
+| 4. Two draws at the same moment | Two separate DB connections race; exactly one winner is recorded | › 4, 4b |
+| 5. Restart after the draw | Same winner; no more draws, submissions or edits | › 5 |
+| 6. New round | 0 of 9; old submissions excluded; previous winner kept | › 6 |
+| 7. Bad input | Unknown names, blank or too-long titles rejected; names matched case-insensitively | › 7 |
+| 8. Fairness | Rejection-sampling proof, a chi-square test on 180,000 draws, and 1,800 full rounds | › 8 |
 
-**Secrets** are never committed. They're stored encrypted by Cloudflare:
+`units.test.js` covers edit, remove, restore and add-on-behalf, the private dashboard, title secrecy, export, config validation, session signing and expiry, invalidation on password change, login lockout, and rate-limit windows.
 
-| Secret | How to set it |
-|---|---|
-| `NOTION_TOKEN` | `npx wrangler secret put NOTION_TOKEN` |
-| `ADMIN_TOKEN` | `npx wrangler secret put ADMIN_TOKEN`. Use 16+ random characters, for example from `openssl rand -base64 24`. Admin is disabled if it's missing or shorter. |
-
-For local development, put both in `.dev.vars` (git-ignored; see `.dev.vars.example`).
-
-## 8. Deployment
-
-You need Node.js 22.13+ and a free Cloudflare account (no credit card needed for the Workers Free plan).
+## 8. Local development
 
 ```bash
-git clone <this repo> && cd family-movie-night-lottery
-npm install
-npx wrangler login                       # opens the browser once
-# edit wrangler.toml [vars]: names, form URL, database IDs
-npx wrangler secret put NOTION_TOKEN
-npx wrangler secret put ADMIN_TOKEN
-npm test                                 # optional but recommended
-npm run deploy
+cp .dev.vars.example .dev.vars   # set FAMILY_MEMBERS and ADMIN_PASSWORD
+npm run dev                      # http://localhost:8787  (admin: /admin)
 ```
 
-Wrangler prints your URL, for example `https://family-movie-night-lottery.<you>.workers.dev`. That's the link to share with the family. To redeploy after a change, run `npm run deploy` again. State in the Durable Object survives redeploys.
+Local data is kept in `.wrangler/state` (git-ignored). Delete that folder to start fresh. Use `http://localhost`, not `127.0.0.1`, so the browser accepts the `Secure` admin cookie.
 
-**Try it locally without Notion:**
+To deploy by hand instead of through Workers Builds, run `npx wrangler login` and then `npm run deploy`.
 
-```bash
-npm run mock:notion        # terminal 1: fake Notion API on :8788
-npm run dev:mock           # terminal 2: the Worker on http://localhost:8787
-curl -X POST "http://127.0.0.1:8788/__fill?count=8"                      # 8 submissions
-curl -X POST "http://127.0.0.1:8788/__submit?name=Elena&title=Up"        # the ninth
-curl http://localhost:8787/__scheduled                                   # run the cron now
-```
+## 9. Free-tier budget
 
-The local admin token for `dev:mock` is `local-admin-token-123`.
-
-## 9. Administrator guide
-
-The admin page is at **`/admin`**. Enter your `ADMIN_TOKEN`. It's kept only in that browser tab's session storage.
-
-**During a round**
-* See who's counted, who has duplicates, and who hasn't submitted.
-* **Fix a duplicate:** in Notion, open *Movie Submissions* and find the member's rows marked `Duplicate`. Set the unwanted ones to `Rejected`, or delete them.
-* **Replace someone's movie:** edit the row's `Movie Title` in Notion before the draw. To swap in a new submission instead, set the old row to `Rejected`.
-* **Add a movie for someone without a phone:** add a row in Notion yourself with their name and title.
-* **Check Notion now:** runs a check immediately instead of waiting for the next minute.
-
-**You never draw the winner yourself.** It happens automatically on the first check after nine valid submissions.
-
-**Start the next movie night**
-1. Open `/admin` → **Start new round** (only enabled once the current round is *Completed*).
-2. Progress resets to **0 of 9**. Earlier submissions keep their old round ID and never count again. Past winners remain on the page and in *Lottery Rounds*.
-3. Share the same form link again.
-
-The winner of a completed round can't be changed from the admin page or anywhere else. It's written once by a guarded database update and never modified.
-
-## 10. Changing the nine family members
-
-1. Edit `FAMILY_MEMBERS` in `wrangler.toml`. There must be exactly nine, with no duplicates. Spelling is matched case-insensitively.
-2. Make the `Your Name` options in Notion match. `npm run notion:check -- --sync-members` adds new names. Remove old names in Notion yourself (the property's ••• → Edit property).
-3. `npm run deploy`.
-
-It's best to change names between rounds. A name removed mid-round no longer counts. That person's row shows `Needs review`.
-
-## 11. Testing
-
-```bash
-npm test
-```
-
-The tests use only Node's built-in runner, `node:sqlite` (the same SQL as the Durable Object), and an in-memory fake of the Notion API. The real `NotionClient`, including retries, runs against that fake.
-
-| Required scenario | Test |
-|---|---|
-| 1. Eight submissions → no winner | `scenarios.test.js` › 1 |
-| 2. Ninth submission → automatic draw, winner hidden until the reveal, then mirrored to Notion | › 2 |
-| 3. Duplicate + missing member → no draw; admin rejects the extra → draw | › 3 |
-| 4. Concurrent processing: two separate connections to one SQLite file race, and exactly one winner is recorded once in Notion | › 4, 4b |
-| 5. Restart after draw → same winner, even if Notion rows are edited afterwards | › 5 |
-| 6. New round → 0 of 9, old and late submissions excluded, old winner kept | › 6 |
-| 7. Notion outages: transient errors retried, sustained outage means no draw (then recovery), a failed later page never draws from partial data, failed result writes retried | › 7 |
-| 8. Fairness: exact rejection-sampling proof, a chi-square test on 180,000 draws, and 1,800 full end-to-end rounds | › 8 |
-
-`units.test.js` covers the duplicate rules, config validation, Notion client retry behavior, admin auth, the public API never leaking titles early, and the free-plan write cap.
-
-**Fairness.** `secureRandomInt(9)` reads 32-bit values from `crypto.getRandomValues`. It rejects values at or above `2³² − (2³² mod 9)`, so each of the nine outcomes keeps exactly the same number of possible inputs. Every movie has a 1/9 ≈ 11.11% chance. (A plain `% 9` would be very slightly biased.)
-
-## 12. Security and privacy
-
-* **Secrets:** `NOTION_TOKEN` and `ADMIN_TOKEN` are Cloudflare secrets. They're never sent to the browser or committed. The front end only ever calls the Worker's own API.
-* **Least privilege:** the integration is connected to the two databases only.
-* **The submissions database stays private.** Family members never see it. The public API exposes only first names and counts while a round is open. **Movie titles appear only after the winner is revealed.**
-* **Admin actions** (`/api/admin/*`) need `Authorization: Bearer <ADMIN_TOKEN>`. The comparison is constant-time, using SHA-256 digests. Admin is turned off entirely unless a token of 16+ characters is configured.
-* Everything rendered on the page is HTML-escaped. Responses send `nosniff`, `no-referrer` and `X-Frame-Options: DENY`.
-* **Not protected (by design):** anyone with the form link can submit under any name. The duplicate rule and the admin review are the safeguard.
-
-## 13. Free-tier budget
-
-| Resource | Free allowance | This app |
+| Resource | Workers Free allowance | This app |
 |---|---|---|
-| Worker requests | 100,000/day | 1,440 cron runs + page views and polls (about 6/min per open tab) |
-| Cron triggers | 5 per account | 1 |
-| CPU time | 10 ms per invocation | Small JSON and SQL work; Notion wait time doesn't count as CPU |
-| Outbound requests | 50 per invocation | ≤ 2 queries + ≤ 25 writes per check (larger backlogs continue next check) |
-| Durable Objects (SQLite) | 100,000 requests/day, 5 GB | About 1,440 cron calls + page views; a few KB per round |
-| Notion API | About 3 requests/s average | About 1 query/min, plus writes only when something changes |
+| Worker requests | 100,000 / day | A few hundred per movie night |
+| Durable Object requests | 100,000 / day | One per page load or button click |
+| Durable Object storage | 5 GB (SQLite) | A few KB per round |
+| CPU time | 10 ms per request | Small SQL queries; HMAC and SHA-256 for admin requests |
+| Cron triggers | 5 per account | **0** (none used) |
+| Workers Builds | Included on the Free plan | One short build per push |
 
-Once a round is completed, cron checks don't call Notion at all until the next round starts.
+If any limit were ever reached, Cloudflare rejects requests until the daily reset. It never bills you on the Free plan.
 
-## 14. Project layout
+## 10. Project layout
 
 ```
 src/
-  index.js        Worker: routes, admin auth, cron handler
-  lottery-do.js   Durable Object wrapper (single instance → serialized)
-  lottery.js      Core logic: duplicate rules, the draw, reveal, Notion sync
-  store.js        SQLite schema and the compare-and-set draw
-  notion.js       Minimal Notion API client with retry/backoff
+  index.js        Worker: routes, CSRF checks, session cookie
+  lottery-do.js   Durable Object: the single owner of all state
+  lottery.js      Core logic: validation, duplicate rule, draw, rounds, views
+  store.js        SQLite schema, compare-and-set draw, counters
+  auth.js         Admin password, signed sessions, lockout
   random.js       Unbiased crypto random integer
-  config.js       Environment parsing and validation; Notion property names
-  auth.js         Admin token check
-  ui.js           Results page and admin page (plain HTML/CSS/JS)
-scripts/
-  notion-check.mjs   Validate Notion setup; sync family names
-  mock-notion.mjs    Local fake Notion API for trying the app
-test/                node:test suites + fake Notion
-wrangler.toml        Worker, cron, Durable Object, [vars]
+  config.js       FAMILY_MEMBERS / ADMIN_PASSWORD validation
+  ui.js           Main page and admin dashboard (plain HTML/CSS/JS)
+test/             node:test suites
+wrangler.toml     Worker + Durable Object config (no secrets, no names)
 ```
 
 The only dependency is `wrangler`, the Cloudflare CLI, as a dev dependency. The runtime has none.

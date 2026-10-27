@@ -1,5 +1,5 @@
 // The two HTML pages, served by the Worker. No build step, no framework.
-// All data is rendered client-side from /api/status and is always escaped.
+// All data is rendered client-side from the JSON API and is always escaped.
 
 const ICONS = {
   clapper: `<svg class="clapper" viewBox="0 0 96 80" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M10 6l6 7M4 22l9 1M24 2l1 8M86 8l-6 7M92 24l-9 1"/><rect x="22" y="34" width="56" height="40" rx="6"/><path d="M22 34l-3-14 54-9 3 14z"/><path d="M31 18.5l9 12M45 16l9 12M59 13.6l9 12"/><path d="M33 48h28M33 59h20"/></g></svg>`,
@@ -76,6 +76,40 @@ details.picks summary{cursor:pointer;font-weight:700;color:var(--muted);text-ali
 .skeleton{min-height:280px;display:grid;place-items:center;color:var(--muted)}
 footer{text-align:center;color:#a8927e;font-size:.8rem;margin-top:28px}
 footer a{color:inherit}
+.movie-form{text-align:left;max-width:400px;margin:4px auto 0;display:grid;gap:14px}
+.movie-form label{display:grid;gap:6px;font-weight:700}
+.field{width:100%;font:inherit;font-size:1.05rem;color:var(--ink);background:#fff;border:1.5px solid #d6c6ae;border-radius:14px;padding:13px 14px;min-height:52px}
+.field:focus{outline:3px solid rgba(242,191,104,.6);border-color:var(--gold)}
+.movie-form .btn{justify-self:center;margin-top:4px}
+.movie-form .note{text-align:center;margin:0}
+.hp{position:absolute!important;left:-9999px;width:1px;height:1px;opacity:0}
+.hint{margin:0;color:var(--warn);font-size:.92rem}
+.msg{margin:0;text-align:center;font-weight:700}
+.msg.err{color:var(--burgundy)}
+.thanks{font-size:1.1rem;margin:6px 0 0}
+.linkish{background:none;border:0;color:var(--burgundy);font:inherit;font-weight:700;text-decoration:underline;cursor:pointer;padding:6px}
+.admin-card{text-align:left;margin-bottom:18px}
+.admin-card h2{justify-content:flex-start}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.btn.small{width:auto;min-height:0;font-size:.95rem;padding:10px 18px;box-shadow:none}
+.btn.dark{background:#3d2a20}
+.btn:disabled{background:#b9ab9e;box-shadow:none;cursor:not-allowed;transform:none}
+.member{padding:12px 0;border-top:1px solid #eadfcd}
+.member:first-of-type{border-top:0}
+.member-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.member-name{font-weight:800}
+.badge{font-size:.8rem;font-weight:800;padding:3px 10px;border-radius:99px;white-space:nowrap}
+.badge.ready{background:#dcefe2;color:var(--ok)}
+.badge.duplicate{background:#fdecc8;color:var(--warn)}
+.badge.missing{background:#efe6d8;color:var(--muted)}
+.sub-list{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:6px}
+.sub-item{display:flex;justify-content:space-between;align-items:center;gap:8px;background:#fff;border:1px solid #eadfcd;border-radius:12px;padding:8px 10px}
+.sub-item .t{font-weight:700;overflow-wrap:anywhere}
+.sub-item .when{display:block;color:var(--muted);font-size:.8rem;font-weight:400}
+.sub-item .actions{display:flex;gap:2px;flex-shrink:0}
+.sub-item .actions button{font-size:.85rem;padding:4px 6px}
+.draw-hint{color:var(--muted);margin:10px 0 0}
+.winner-box{background:#fff;border:1.5px solid #e4bcc0;border-radius:16px;padding:14px 16px;margin:6px 0 16px}
 @keyframes bob{50%{transform:translateY(-8px) rotate(-3deg)}}
 @keyframes twinkle{50%{opacity:.2;transform:scale(.7)}}
 @keyframes dot{0%,100%{opacity:.25}40%{opacity:1}}
@@ -108,7 +142,29 @@ export function mainPage() {
 <body>
 <main>
   ${HEADER}
-  <section id="card" class="card skeleton" aria-live="polite"><p>Rolling the film…</p></section>
+  <section class="card">
+    <div id="status" aria-live="polite"><p class="skeleton">Rolling the film…</p></div>
+    <div id="form-wrap" hidden>
+      <form id="movie-form" class="movie-form" novalidate>
+        <label>Your Name
+          <select class="field" name="name" id="name" required><option value="">Choose your name…</option></select>
+        </label>
+        <label>Movie Title
+          <input class="field" name="title" id="title" required maxlength="120" autocomplete="off" placeholder="e.g. The Princess Bride">
+        </label>
+        <input class="hp" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <p class="hint" id="dup-hint" hidden></p>
+        <button class="btn" id="submit-btn">${ICONS.film}Submit Your Movie</button>
+        <p class="note">No account needed. Your pick stays secret until the draw.</p>
+        <p class="msg err" id="form-msg" role="alert"></p>
+      </form>
+      <div id="thanks" hidden>
+        <p class="thanks" id="thanks-text"></p>
+        <button class="linkish" id="again" type="button">Submit for someone else</button>
+      </div>
+    </div>
+    <div id="chips"></div>
+  </section>
   <p id="status-line" class="status-line"></p>
   <section id="history" class="history" hidden></section>
   <footer>🍿 Good movies, better company.</footer>
@@ -120,13 +176,19 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':
 const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 const shortDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 const plural = (n, one, many) => n === 1 ? one : many;
-let lastState = null, timer = null, failures = 0;
+let status = null, lastState = null;
 
 function renderOpen(s) {
   const n = s.submittedCount, total = s.total, left = total - n;
   const msg = n === 0 ? 'Waiting for everyone to submit their movie!'
     : 'Waiting for ' + left + ' more family ' + plural(left, 'member', 'members') + ' to submit their movie!';
-  const hasForm = /^https:\\/\\//.test(s.formUrl || '');
+  return '<h2>' + ICONS.people + '<span>' + n + ' of ' + total + ' Movies Submitted</span></h2>'
+    + '<div class="progress-row"><div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="' + total + '" aria-valuenow="' + n + '" aria-label="Movies submitted"><div class="bar" style="width:' + (n / total * 100) + '%"></div></div><span class="count">' + n + ' / ' + total + '</span></div>'
+    + '<p class="lead">' + msg + '</p>';
+}
+
+function renderChips(s) {
+  if (s.state !== 'open') return '';
   const chips = [
     ...s.submitted.map((m) => '<li class="chip in">' + esc(m) + '</li>'),
     ...s.needsAttention.map((m) => '<li class="chip attn">' + esc(m) + '</li>'),
@@ -134,17 +196,11 @@ function renderOpen(s) {
   ].join('');
   const attn = s.needsAttention.length
     ? '<p class="attention">' + esc(s.needsAttention.join(', ')) + ' sent more than one movie. The organizer will pick the right one.</p>' : '';
-  return '<h2>' + ICONS.people + '<span>' + n + ' of ' + total + ' Movies Submitted</span></h2>'
-    + '<div class="progress-row"><div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="' + total + '" aria-valuenow="' + n + '" aria-label="Movies submitted"><div class="bar" style="width:' + (n / total * 100) + '%"></div></div><span class="count">' + n + ' / ' + total + '</span></div>'
-    + '<p class="lead">' + msg + '</p>'
-    + (hasForm
-      ? '<a class="btn" href="' + esc(s.formUrl) + '" target="_blank" rel="noopener">' + ICONS.film + 'Submit Your Movie</a><p class="note">Opens a Notion form (no account needed)</p>'
-      : '<span class="btn" aria-disabled="true">' + ICONS.film + 'Submit Your Movie</span><p class="note">The organizer hasn\\'t added the form link yet.</p>')
-    + attn + '<ul class="chips" aria-label="Who has submitted">' + chips + '</ul>';
+  return attn + '<ul class="chips" aria-label="Who has submitted">' + chips + '</ul>';
 }
 
-function renderDrawing() {
-  return '<div class="drawing"><h2>All movies are in!<span class="sub">Drawing our winner…</span></h2>'
+function renderReady() {
+  return '<div class="drawing"><h2>All movies are in!<span class="sub">Waiting for the organizer to draw our winner…</span></h2>'
     + '<span class="sparkles">' + ICONS.popcorn + '</span><div class="dots"><i></i><i></i><i></i><i></i><i></i></div></div>';
 }
 
@@ -174,19 +230,33 @@ function confetti() {
   }
 }
 
+function fillNames(s) {
+  const sel = $('name');
+  if (sel.options.length > 1) return;
+  for (const m of s.members) sel.add(new Option(m, m));
+}
+
+function updateDupHint() {
+  const name = $('name').value, hint = $('dup-hint');
+  const already = status && name && (status.submitted.includes(name) || status.needsAttention.includes(name));
+  hint.hidden = !already;
+  if (already) hint.textContent = name + ' already has a movie in. Submitting again flags a duplicate for the organizer to sort out.';
+}
+
 function render(s) {
-  const card = $('card');
-  card.classList.remove('skeleton');
-  const html = s.state === 'open' ? renderOpen(s) : s.state === 'drawing' ? renderDrawing() : renderCompleted(s);
-  if (card.dataset.html !== html) {
-    card.innerHTML = html;
-    card.dataset.html = html;
+  status = s;
+  const html = s.state === 'completed' ? renderCompleted(s) : s.state === 'ready' ? renderReady() : renderOpen(s);
+  const box = $('status');
+  if (box.dataset.html !== html) {
+    box.innerHTML = html;
+    box.dataset.html = html;
     if (s.state === 'completed' && lastState !== 'completed') confetti();
   }
+  $('chips').innerHTML = renderChips(s);
+  $('form-wrap').hidden = s.state !== 'open';
+  if (s.state === 'open') { fillNames(s); updateDupHint(); }
   lastState = s.state;
-  $('status-line').textContent = s.state === 'open'
-    ? (s.notionError ? 'Having trouble reaching Notion. Retrying automatically…' : 'Updates automatically. ' + s.round.label)
-    : s.round.label;
+  $('status-line').textContent = s.round.label;
   const hist = $('history');
   if (s.history && s.history.length) {
     hist.hidden = false;
@@ -195,24 +265,42 @@ function render(s) {
 }
 
 async function refresh() {
-  clearTimeout(timer);
-  let delay = 10000;
   try {
     const res = await fetch('/api/status', { cache: 'no-store' });
     const s = await res.json();
     if (!res.ok) throw new Error(s.error || res.statusText);
-    failures = 0;
     render(s);
-    if (s.state === 'drawing') delay = Math.min(Math.max(s.revealAt - Date.now() + 500, 1500), 5000);
-    if (s.state === 'completed') delay = 60000;
   } catch (e) {
-    failures++;
-    delay = Math.min(10000 * failures, 60000);
-    if (!lastState) { $('card').innerHTML = '<p>' + esc(e.message || 'Can\\'t reach the lottery right now.') + '</p><p class="note">Retrying automatically…</p>'; }
-    else $('status-line').textContent = 'Connection hiccup. Retrying…';
+    if (!lastState) $('status').innerHTML = '<p>' + esc(e.message || 'Can\\'t reach the lottery right now.') + '</p><p class="note">Try reloading the page.</p>';
+    else $('status-line').textContent = 'Connection hiccup. Reload to try again.';
   }
-  timer = setTimeout(refresh, delay);
 }
+
+$('name').addEventListener('change', updateDupHint);
+$('movie-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target, msg = $('form-msg'), btn = $('submit-btn');
+  const data = Object.fromEntries(new FormData(form));
+  if (!data.name) { msg.textContent = 'Please choose your name.'; $('name').focus(); return; }
+  if (!data.title.trim()) { msg.textContent = 'Please enter a movie title.'; $('title').focus(); return; }
+  msg.textContent = '';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error || 'Something went wrong.');
+    form.reset();
+    form.hidden = true;
+    $('thanks').hidden = false;
+    $('thanks-text').textContent = '🍿 Thanks, ' + (out.member || data.name) + '! Your movie is in. It stays secret until the draw.';
+    await refresh();
+  } catch (err) {
+    msg.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+$('again').addEventListener('click', () => { $('thanks').hidden = true; $('movie-form').hidden = false; $('name').focus(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 refresh();
 </script>
@@ -224,79 +312,126 @@ export function adminPage() {
 <body>
 <main>
   <header><h1 style="font-size:2rem">Lottery Admin</h1><p class="tagline">Only the organizer needs this page.</p></header>
-  <section class="card" style="text-align:left">
-    <form id="login" style="display:flex;gap:8px;flex-wrap:wrap">
-      <label for="token" style="width:100%;font-weight:700">Admin token</label>
-      <input id="token" type="password" autocomplete="current-password" required style="flex:1;min-width:0;padding:12px 14px;border-radius:12px;border:1.5px solid #d6c6ae;font:inherit">
-      <button class="btn" style="width:auto;min-height:0;padding:12px 22px;font-size:1rem">Unlock</button>
+  <section class="card admin-card" id="login-card" hidden>
+    <form id="login" class="movie-form" style="max-width:none">
+      <label>Admin password
+        <input class="field" id="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="btn">Sign in</button>
+      <p class="msg err" id="login-msg" role="alert"></p>
     </form>
-    <div id="panel" hidden>
-      <div id="info"></div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:18px">
-        <button class="btn" id="check" style="width:auto;font-size:1rem">Check Notion now</button>
-        <button class="btn" id="new" style="width:auto;font-size:1rem;background:#3d2a20">Start new round</button>
-      </div>
-      <details class="picks" open><summary>How to fix a duplicate</summary>
-        <p>When someone submits more than once, every one of their rows is marked <b>Duplicate</b> in the Movie Submissions database and they don't count yet. Open the database in Notion and set <b>Status</b> to <b>Rejected</b> on the rows you don't want (or delete them). On the next check (within a minute) the remaining row becomes <b>Counted</b>.</p>
-        <p>To replace a movie before the draw, just edit its <b>Movie Title</b> in Notion.</p>
-      </details>
-    </div>
-    <p id="msg" class="note" role="status"></p>
   </section>
+  <div id="dash" hidden>
+    <section class="card admin-card" id="round-card"></section>
+    <section class="card admin-card" id="members-card"></section>
+    <section class="card admin-card" id="extra-card" hidden></section>
+    <div class="row" style="justify-content:center">
+      <a class="btn small dark" href="/api/admin/export" download>Download backup</a>
+      <button class="btn small dark" id="logout">Sign out</button>
+    </div>
+  </div>
+  <p class="msg" id="msg" role="status" style="color:var(--cream);margin-top:14px"></p>
   <footer><a href="/">← Back to the lottery</a></footer>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const when = (ms) => ms ? new Date(ms).toLocaleString() : '—';
-let token = '';
-try { token = sessionStorage.getItem('adminToken') || ''; } catch {}
+const when = (ms) => new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+let state = null;
 
-async function api(path, method = 'GET') {
-  const res = await fetch(path, { method, headers: { Authorization: 'Bearer ' + token } });
+async function call(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401) { token = ''; try { sessionStorage.removeItem('adminToken'); } catch {} show(false); throw new Error('Wrong token.'); }
+  if (res.status === 401 && path !== '/api/admin/login') { showLogin(); throw new Error(data.error || 'Please sign in.'); }
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
 }
-function show(on) { $('panel').hidden = !on; $('login').hidden = on; }
-function render(r) {
-  const p = r.progress || { submitted: [], missing: r.members, conflicts: [] };
-  const list = (a) => a.length ? a.map(esc).join(', ') : '—';
-  let html = '<h2 style="justify-content:flex-start">' + esc(r.label) + ' · ' + esc(r.status) + '</h2>'
-    + '<p>Round ID: <code>' + esc(r.id) + '</code><br>Started: ' + esc(r.startedAt ? when(r.startedAt) : 'beginning') + '<br>Last Notion check: ' + esc(when(r.checkedAt)) + '</p>';
-  if (r.lastError) html += '<p class="attention">Last Notion error: ' + esc(r.lastError) + '</p>';
-  if (r.status === 'Open') {
-    html += '<p><b>Counted (' + p.submitted.length + '/' + r.members.length + '):</b> ' + list(p.submitted) + '</p>'
-      + '<p><b>Duplicates to resolve:</b> ' + list(p.conflicts) + '</p>'
-      + '<p><b>Not yet submitted:</b> ' + list(p.missing) + '</p>';
-  } else if (r.status === 'Completed') {
-    html += '<p><b>Winner:</b> ' + esc(r.winnerTitle) + ' (' + esc(r.winnerMember) + '), drawn ' + esc(when(r.drawnAt)) + '</p>'
-      + '<p><b>Synced to Notion:</b> ' + (r.notionSynced ? 'yes' : 'pending, retrying every minute') + '</p>';
+
+function showLogin() { $('dash').hidden = true; $('login-card').hidden = false; $('password').focus(); }
+
+function subItem(s, open) {
+  const meta = when(s.createdAt) + (s.source === 'admin' ? ' · added by you' : '') + (s.updatedAt && !s.removedAt ? ' · edited' : '');
+  const actions = !open ? '' : s.removedAt
+    ? '<button class="linkish" data-act="restore" data-id="' + s.id + '">Restore</button>'
+    : '<button class="linkish" data-act="edit" data-id="' + s.id + '">Edit</button><button class="linkish" data-act="remove" data-id="' + s.id + '">Remove</button>';
+  return '<li class="sub-item"><span><span class="t">' + esc(s.title) + '</span><span class="when">' + (s.removedAt ? esc(s.member) + ' · ' : '') + esc(meta) + '</span></span><span class="actions">' + actions + '</span></li>';
+}
+
+function render(st) {
+  state = st;
+  const r = st.round, open = r.status === 'Open';
+  let html = '<h2>' + esc(r.label) + ' · ' + (open ? 'Open' : 'Drawn') + '</h2>';
+  if (open) {
+    html += '<div class="progress-row"><div class="progress"><div class="bar" style="width:' + (st.readyCount / st.total * 100) + '%"></div></div><span class="count">' + st.readyCount + ' / ' + st.total + '</span></div>';
+    const dups = st.members.filter((m) => m.status === 'duplicate').map((m) => m.name);
+    const missing = st.members.filter((m) => m.status === 'missing').map((m) => m.name);
+    const hint = st.canDraw ? 'Everyone has exactly one movie. Ready when you are!'
+      : [missing.length ? 'Waiting for: ' + missing.join(', ') + '.' : '', dups.length ? 'Remove extra entries for: ' + dups.join(', ') + '.' : ''].join(' ');
+    html += '<p class="draw-hint">' + esc(hint) + '</p><div class="row" style="margin-top:14px"><button class="btn" id="draw"' + (st.canDraw ? '' : ' disabled') + '>🎲 Draw Winning Movie</button></div>';
   } else {
-    html += '<p>Winner drawn ' + esc(when(r.drawnAt)) + '. Revealing shortly…</p>';
+    html += '<div class="winner-box"><p class="winner-kicker" style="margin:0 0 4px">🎉 ' + esc(r.winnerTitle) + '</p><p style="margin:0">Submitted by <b>' + esc(r.winnerMember) + '</b> · drawn ' + esc(when(r.drawnAt)) + '</p></div>'
+      + '<p class="draw-hint" style="margin:0 0 14px">The winner is saved permanently and can\\'t be redrawn. When it\\'s time for the next movie night:</p>'
+      + '<button class="btn dark" id="new-round">Start New Round</button>';
   }
-  $('info').innerHTML = html;
-  $('new').disabled = r.status !== 'Completed';
-  $('new').style.opacity = r.status === 'Completed' ? 1 : .5;
+  $('round-card').innerHTML = html;
+
+  const label = { ready: '✓ Ready', duplicate: '! Duplicate', missing: 'Not yet' };
+  $('members-card').innerHTML = '<h2>' + (open ? 'Family submissions' : 'This round\\'s picks') + '</h2>' + st.members.map((m) =>
+    '<div class="member"><div class="member-head"><span class="member-name">' + esc(m.name) + '</span><span class="badge ' + m.status + '">' + label[m.status] + '</span></div>'
+    + (m.submissions.length ? '<ul class="sub-list">' + m.submissions.map((s) => subItem(s, open)).join('') + '</ul>' : '')
+    + (open && m.status === 'missing' ? '<button class="linkish" data-act="add" data-name="' + esc(m.name) + '">+ Add a movie for ' + esc(m.name) + '</button>' : '')
+    + '</div>').join('');
+
+  const extra = [];
+  if (st.unknown.length) extra.push('<h2>Other names</h2><p class="draw-hint">Entries under a name that is no longer in the family list. They never count.</p><ul class="sub-list">' + st.unknown.map((s) => subItem({ ...s, title: s.title + ' (' + s.member + ')' }, open)).join('') + '</ul>');
+  if (st.removed.length) extra.push('<h2>Removed</h2><ul class="sub-list">' + st.removed.map((s) => subItem(s, open)).join('') + '</ul>');
+  $('extra-card').hidden = !extra.length;
+  $('extra-card').innerHTML = extra.join('');
+
+  $('login-card').hidden = true;
+  $('dash').hidden = false;
 }
-async function load(path = '/api/admin/status', method = 'GET') {
-  $('msg').textContent = 'Working…';
-  try { render(await api(path, method)); show(true); $('msg').textContent = ''; }
+
+async function act(action, payload, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  $('msg').textContent = '';
+  try { render(await call('/api/admin/' + action, payload || {})); }
   catch (e) { $('msg').textContent = e.message; }
 }
-$('login').addEventListener('submit', (e) => {
-  e.preventDefault(); token = $('token').value.trim();
-  try { sessionStorage.setItem('adminToken', token); } catch {}
-  load();
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.id === 'draw') return act('draw', {}, 'Draw the winning movie now? This can only happen once per round.');
+  if (b.id === 'new-round') return act('new-round', {}, 'Start a new movie night? Progress resets to 0 of 9. Past winners are kept.');
+  if (b.id === 'logout') return call('/api/admin/logout', {}).finally(showLogin);
+  const id = Number(b.dataset.id);
+  if (b.dataset.act === 'remove') return act('remove', { id }, 'Remove this submission? You can restore it later.');
+  if (b.dataset.act === 'restore') return act('restore', { id });
+  if (b.dataset.act === 'edit') {
+    const sub = [...state.members.flatMap((m) => m.submissions), ...state.unknown].find((s) => s.id === id);
+    const title = prompt('Movie title', sub ? sub.title : '');
+    if (title !== null) act('edit', { id, title });
+  }
+  if (b.dataset.act === 'add') {
+    const title = prompt('Movie title for ' + b.dataset.name);
+    if (title) act('add', { name: b.dataset.name, title });
+  }
 });
-$('check').addEventListener('click', () => load('/api/admin/check', 'POST'));
-$('new').addEventListener('click', async () => {
-  if (!confirm('Start a new movie night? Progress resets to 0 of 9. The previous winner is kept.')) return;
-  try { await api('/api/admin/new-round', 'POST'); await load(); $('msg').textContent = 'New round started. Share the form link again!'; }
-  catch (e) { $('msg').textContent = e.message; }
+
+$('login').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('login-msg').textContent = '';
+  try {
+    await call('/api/admin/login', { password: $('password').value });
+    $('password').value = '';
+    render(await call('/api/admin/state'));
+  } catch (err) { $('login-msg').textContent = err.message; }
 });
-if (token) load();
+
+call('/api/admin/state').then(render).catch(showLogin);
 </script>
 </body></html>`;
 }
