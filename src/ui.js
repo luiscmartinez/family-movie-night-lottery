@@ -8,6 +8,85 @@ const ICONS = {
   popcorn: `<svg class="bucket" viewBox="0 0 120 120" aria-hidden="true"><g fill="#f6dd9c" stroke="#d9a94b" stroke-width="2"><circle cx="34" cy="38" r="12"/><circle cx="52" cy="28" r="13"/><circle cx="70" cy="30" r="12"/><circle cx="86" cy="40" r="11"/><circle cx="44" cy="44" r="11"/><circle cx="62" cy="42" r="12"/><circle cx="78" cy="48" r="10"/></g><path d="M24 48h72l-9 64H33z" fill="#fff8ec"/><path d="M33 48h11l3 64H37zM55 48h10v64H55zM76 48h11l-4 64h-10z" fill="#b5172b"/><path d="M24 48h72l-9 64H33z" fill="none" stroke="#7a1422" stroke-width="3" stroke-linejoin="round"/></svg>`,
 };
 
+// Prize-wheel animation shared by both pages. The winner is already decided
+// and saved by the server; the wheel only animates to land on winnerIndex.
+// Kept as a plain string so it reaches the browser exactly as written.
+export const WHEEL_SCRIPT = `
+function wheelRotation(n, winnerIndex, jitter, turns) {
+  // Rotating the wheel clockwise by this many degrees puts the winning
+  // slice (offset by jitter, a fraction of a slice) under the top pointer.
+  var seg = 360 / n;
+  return 360 * turns - (winnerIndex + 0.5 + jitter) * seg;
+}
+
+function wheelSvg(labels) {
+  var n = labels.length, seg = 360 / n, r = 148, c = 160;
+  var dark = ['#7b1421', '#4e0d16'], light = ['#fdf6ea', '#f2bf68'];
+  // Labels must fit between the center hub and the rim (about 95px).
+  var size = n <= 8 ? 13 : n <= 14 ? 11 : 10;
+  var max = n <= 14 ? 13 : 11;
+  var out = '<svg viewBox="0 0 320 320" role="img" aria-label="Prize wheel with ' + n + ' movies"><circle cx="160" cy="160" r="157" fill="#3a1f14"/>';
+  for (var i = 0; i < n; i++) {
+    var a0 = i * seg * Math.PI / 180, a1 = (i + 1) * seg * Math.PI / 180;
+    var x0 = c + r * Math.sin(a0), y0 = c - r * Math.cos(a0);
+    var x1 = c + r * Math.sin(a1), y1 = c - r * Math.cos(a1);
+    var odd = n % 2 === 1 && i === n - 1; // keeps the last slice from matching the first
+    var isDark = i % 2 === 0 && !odd;
+    var fill = odd ? '#e58a3a' : isDark ? dark[(i / 2) % 2] : light[((i - 1) / 2) % 2];
+    var label = String(labels[i]);
+    if (label.length > max) label = label.slice(0, max - 1) + '…';
+    label = label.replace(/[&<>"]/g, function (ch) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]; });
+    out += '<path class="seg" data-i="' + i + '" fill="' + fill + '" d="M' + c + ' ' + c + 'L' + x0.toFixed(2) + ' ' + y0.toFixed(2)
+      + 'A' + r + ' ' + r + ' 0 ' + (seg > 180 ? 1 : 0) + ' 1 ' + x1.toFixed(2) + ' ' + y1.toFixed(2) + 'Z"/>';
+    out += '<text transform="rotate(' + ((i + 0.5) * seg - 90).toFixed(2) + ' ' + c + ' ' + c + ')" x="' + (c + r - 14) + '" y="' + c
+      + '" fill="' + (isDark ? '#fdf6ea' : '#2b1a12') + '" font-size="' + size + '" text-anchor="end" dominant-baseline="middle">' + label + '</text>';
+  }
+  for (var k = 0; k < n; k++) {
+    var a = k * seg * Math.PI / 180;
+    out += '<circle cx="' + (c + 151 * Math.sin(a)).toFixed(2) + '" cy="' + (c - 151 * Math.cos(a)).toFixed(2) + '" r="4" fill="#f2bf68"/>';
+  }
+  return out + '</svg>';
+}
+
+function spinWheel(el, labels, winnerIndex, onLand, onDone) {
+  el.innerHTML = '<div class="wheel-wrap"><div class="wheel-pointer"></div><div class="wheel">' + wheelSvg(labels)
+    + '</div><div class="wheel-hub" aria-hidden="true">🍿</div></div>';
+  var wheel = el.querySelector('.wheel'), pointer = el.querySelector('.wheel-pointer');
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var ms = reduce ? 0 : 6500, seg = 360 / labels.length, lastSlice = -1, landed = false;
+  var target = wheelRotation(labels.length, winnerIndex, Math.random() * 0.6 - 0.3, reduce ? 1 : 6);
+  function tick() {
+    if (landed) return;
+    var m = getComputedStyle(wheel).transform;
+    if (m && m !== 'none') {
+      var v = m.split('(')[1].split(',');
+      var slice = Math.floor(((Math.atan2(+v[1], +v[0]) * 180 / Math.PI) + 360) % 360 / seg);
+      if (slice !== lastSlice) {
+        lastSlice = slice;
+        pointer.classList.remove('tick');
+        void pointer.offsetWidth;
+        pointer.classList.add('tick');
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(function () {
+    requestAnimationFrame(function () {
+      wheel.style.transition = 'transform ' + ms + 'ms cubic-bezier(.12,.7,.1,1)';
+      wheel.style.transform = 'rotate(' + target + 'deg)';
+      tick();
+    });
+  });
+  setTimeout(function () {
+    landed = true;
+    var win = el.querySelector('.seg[data-i="' + winnerIndex + '"]');
+    if (win) win.classList.add('seg-win');
+    if (onLand) onLand();
+    setTimeout(onDone, reduce ? 600 : 1800);
+  }, ms + 100);
+}
+`;
+
 const STYLE = `
 :root{--bg:#140c09;--cream:#fdf6ea;--cream-2:#f4e9d6;--ink:#2b1a12;--muted:#6e5a4c;--burgundy:#7b1421;--burgundy-2:#962033;--track:#e6d9c5;--gold:#f2bf68;--glow:#ffb35c;--ok:#2f7d4f;--warn:#a5600c}
 *{box-sizing:border-box}
@@ -110,9 +189,28 @@ footer a{color:inherit}
 .sub-item .actions button{font-size:.85rem;padding:4px 6px}
 .draw-hint{color:var(--muted);margin:10px 0 0}
 .winner-box{background:#fff;border:1.5px solid #e4bcc0;border-radius:16px;padding:14px 16px;margin:6px 0 16px}
+.wheel-wrap{position:relative;width:min(320px,78vw);aspect-ratio:1;margin:18px auto 6px}
+.wheel{width:100%;height:100%;border-radius:50%;box-shadow:0 14px 34px rgba(0,0,0,.35),0 0 0 5px var(--gold);will-change:transform}
+.wheel svg{width:100%;height:100%;display:block;font-family:"Nunito Sans",system-ui,sans-serif;font-weight:800}
+.wheel .seg{stroke:#3a1f14;stroke-width:1.5}
+.wheel .seg-win{stroke:#fff;stroke-width:4;filter:brightness(1.18);animation:winpulse .6s ease-in-out 3}
+.wheel-pointer{position:absolute;top:-16px;left:50%;margin-left:-15px;width:0;height:0;border-left:15px solid transparent;border-right:15px solid transparent;border-top:32px solid var(--gold);filter:drop-shadow(0 3px 3px rgba(0,0,0,.45));z-index:2;transform-origin:50% 0}
+.wheel-pointer.tick{animation:tick .14s ease-out}
+.wheel-hub{position:absolute;left:50%;top:50%;width:22%;aspect-ratio:1;transform:translate(-50%,-50%);border-radius:50%;background:var(--cream);border:4px solid var(--gold);display:grid;place-items:center;font-size:clamp(1.2rem,6vw,1.8rem);box-shadow:0 4px 12px rgba(0,0,0,.35);z-index:2}
+.wheel-caption{font-family:"Roboto Slab",Georgia,serif;font-weight:800;font-size:1.3rem;color:var(--burgundy);min-height:1.6em;margin:12px 0 0;overflow-wrap:anywhere}
+.peek{background:none;border:0;cursor:pointer;color:var(--muted);padding:6px;border-radius:8px;display:inline-grid;place-items:center}
+.peek:hover,.peek[aria-pressed=true]{color:var(--burgundy)}
+.peek:focus-visible{outline:3px solid var(--gold)}
+.peek svg{width:20px;height:20px}
+.t.masked{letter-spacing:.18em;color:var(--muted)}
+.sr-only{position:absolute!important;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.members-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:16px}
+.members-head h2{margin:0}
 @keyframes bob{50%{transform:translateY(-8px) rotate(-3deg)}}
 @keyframes twinkle{50%{opacity:.2;transform:scale(.7)}}
 @keyframes dot{0%,100%{opacity:.25}40%{opacity:1}}
+@keyframes tick{40%{transform:rotate(-14deg)}}
+@keyframes winpulse{50%{filter:brightness(1.4)}}
 @keyframes pop{from{transform:scale(.85);opacity:0}}
 @keyframes fall{to{transform:translateY(560px) rotate(540deg)}}
 @media (max-width:420px){main{padding-top:28px}.card{padding:24px 18px;border-radius:22px}.card h2{font-size:1.25rem}}
@@ -170,13 +268,46 @@ export function mainPage() {
   <footer>🍿 Good movies, better company.</footer>
 </main>
 <script>
+${WHEEL_SCRIPT}
 const ICONS = ${JSON.stringify(ICONS)};
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 const shortDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 const plural = (n, one, many) => n === 1 ? one : many;
-let status = null, lastState = null;
+let status = null, lastState = null, spinning = false, pending = null;
+const spunHere = new Set();
+
+// Each viewer sees the wheel spin once per round; "Replay the spin" shows it again.
+function spinKey(s) { return 'fmnl-spun-' + s.round.number + '-' + s.winner.drawnAt; }
+function hasSpun(s) {
+  if (spunHere.has(spinKey(s))) return true;
+  try { return localStorage.getItem(spinKey(s)) === '1'; } catch { return false; }
+}
+function markSpun(s) {
+  spunHere.add(spinKey(s));
+  try { localStorage.setItem(spinKey(s), '1'); } catch {}
+}
+
+function playSpin(s) {
+  spinning = true;
+  status = s;
+  $('form-wrap').hidden = true;
+  $('chips').innerHTML = '';
+  const box = $('status');
+  box.dataset.html = '';
+  box.innerHTML = '<p class="winner-kicker">🎡 Spinning the wheel…</p><div id="wheel"></div><p class="wheel-caption" id="wheel-caption" aria-live="polite"></p>';
+  spinWheel($('wheel'), s.entries.map((e) => e.title), s.winnerIndex,
+    () => { $('wheel-caption').textContent = '🎉 ' + s.winner.title; },
+    () => {
+      markSpun(s);
+      spinning = false;
+      lastState = null; // so the reveal gets confetti
+      const next = pending || s;
+      pending = null;
+      render(next);
+    });
+}
 
 function renderOpen(s) {
   const n = s.submittedCount, total = s.total, left = total - n;
@@ -200,7 +331,7 @@ function renderChips(s) {
 }
 
 function renderReady() {
-  return '<div class="drawing"><h2>All movies are in!<span class="sub">Waiting for the organizer to draw our winner…</span></h2>'
+  return '<div class="drawing"><h2>All movies are in!<span class="sub">Waiting for the organizer to spin the wheel…</span></h2>'
     + '<span class="sparkles">' + ICONS.popcorn + '</span><div class="dots"><i></i><i></i><i></i><i></i><i></i></div></div>';
 }
 
@@ -213,6 +344,7 @@ function renderCompleted(s) {
     + '<p class="winner-by">Submitted by <strong>' + esc(w.member) + '</strong></p>'
     + '<p class="winner-date">Drawn ' + esc(fmtDate(w.drawnAt)) + '</p>'
     + '<p class="popcorn-line">🍿 Get the popcorn ready!</p>'
+    + '<p style="margin:14px 0 0"><button class="linkish" id="replay" type="button">🎡 Replay the spin</button></p>'
     + '<details class="picks"><summary>See all ' + s.entries.length + ' picks</summary><ol>' + picks + '</ol></details>';
 }
 
@@ -244,6 +376,8 @@ function updateDupHint() {
 }
 
 function render(s) {
+  if (spinning) { pending = s; return; }
+  if (s.state === 'completed' && s.entries.length > 1 && !hasSpun(s)) return playSpin(s);
   status = s;
   const html = s.state === 'completed' ? renderCompleted(s) : s.state === 'ready' ? renderReady() : renderOpen(s);
   const box = $('status');
@@ -300,6 +434,9 @@ $('movie-form').addEventListener('submit', async (e) => {
     btn.disabled = false;
   }
 });
+document.addEventListener('click', (e) => {
+  if (e.target.closest('#replay') && status && !spinning) playSpin(status);
+});
 $('again').addEventListener('click', () => { $('thanks').hidden = true; $('movie-form').hidden = false; $('name').focus(); });
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 refresh();
@@ -334,10 +471,19 @@ export function adminPage() {
   <footer><a href="/">← Back to the lottery</a></footer>
 </main>
 <script>
+${WHEEL_SCRIPT}
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const when = (ms) => new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-let state = null;
+const EYE = '<svg viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></g></svg>';
+const EYE_OFF = '<svg viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-2.7 3.6M6.6 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2M3 3l18 18"/></g></svg>';
+let state = null, spinning = false;
+// Movie titles are hidden until the organizer peeks; nothing here is remembered across visits.
+const revealed = new Set();
+
+function allSubs(st) {
+  return [...st.members.flatMap((m) => m.submissions), ...st.unknown, ...st.removed];
+}
 
 async function call(path, body) {
   const res = await fetch(path, body === undefined ? {} : {
@@ -356,11 +502,15 @@ function subItem(s, open) {
   const actions = !open ? '' : s.removedAt
     ? '<button class="linkish" data-act="restore" data-id="' + s.id + '">Restore</button>'
     : '<button class="linkish" data-act="edit" data-id="' + s.id + '">Edit</button><button class="linkish" data-act="remove" data-id="' + s.id + '">Remove</button>';
-  return '<li class="sub-item"><span><span class="t">' + esc(s.title) + '</span><span class="when">' + (s.removedAt ? esc(s.member) + ' · ' : '') + esc(meta) + '</span></span><span class="actions">' + actions + '</span></li>';
+  const shown = revealed.has(s.id);
+  const peek = '<button class="peek" data-act="peek" data-id="' + s.id + '" aria-pressed="' + shown + '" aria-label="' + (shown ? 'Hide' : 'Show') + ' movie title" title="' + (shown ? 'Hide' : 'Show') + ' title">' + (shown ? EYE_OFF : EYE) + '</button>';
+  const title = shown ? esc(s.title) : '<span class="sr-only">Hidden title</span><span aria-hidden="true">••••••••</span>';
+  return '<li class="sub-item"><span><span class="t' + (shown ? '' : ' masked') + '">' + title + '</span><span class="when">' + (s.removedAt ? esc(s.member) + ' · ' : '') + esc(meta) + '</span></span><span class="actions">' + peek + actions + '</span></li>';
 }
 
 function render(st) {
   state = st;
+  if (spinning) return;
   const r = st.round, open = r.status === 'Open';
   let html = '<h2>' + esc(r.label) + ' · ' + (open ? 'Open' : 'Drawn') + '</h2>';
   if (open) {
@@ -373,12 +523,16 @@ function render(st) {
   } else {
     html += '<div class="winner-box"><p class="winner-kicker" style="margin:0 0 4px">🎉 ' + esc(r.winnerTitle) + '</p><p style="margin:0">Submitted by <b>' + esc(r.winnerMember) + '</b> · drawn ' + esc(when(r.drawnAt)) + '</p></div>'
       + '<p class="draw-hint" style="margin:0 0 14px">The winner is saved permanently and can\\'t be redrawn. When it\\'s time for the next movie night:</p>'
-      + '<button class="btn dark" id="new-round">Start New Round</button>';
+      + '<div class="row"><button class="btn dark" id="new-round">Start New Round</button><button class="linkish" id="replay" type="button">🎡 Replay the spin</button></div>';
   }
   $('round-card').innerHTML = html;
 
   const label = { ready: '✓ Ready', duplicate: '! Duplicate', missing: 'Not yet' };
-  $('members-card').innerHTML = '<h2>' + (open ? 'Family submissions' : 'This round\\'s picks') + '</h2>' + st.members.map((m) =>
+  const ids = allSubs(st).map((x) => x.id);
+  const everyShown = ids.length > 0 && ids.every((id) => revealed.has(id));
+  $('members-card').innerHTML = '<div class="members-head"><h2>' + (open ? 'Family submissions' : 'This round\\'s picks') + '</h2>'
+    + (ids.length ? '<button class="linkish" id="peek-all" type="button">' + (everyShown ? 'Hide all titles' : 'Show all titles') + '</button>' : '') + '</div>'
+    + st.members.map((m) =>
     '<div class="member"><div class="member-head"><span class="member-name">' + esc(m.name) + '</span><span class="badge ' + m.status + '">' + label[m.status] + '</span></div>'
     + (m.submissions.length ? '<ul class="sub-list">' + m.submissions.map((s) => subItem(s, open)).join('') + '</ul>' : '')
     + (open && m.status === 'missing' ? '<button class="linkish" data-act="add" data-name="' + esc(m.name) + '">+ Add a movie for ' + esc(m.name) + '</button>' : '')
@@ -394,6 +548,26 @@ function render(st) {
   $('dash').hidden = false;
 }
 
+// The server picks and saves the winner first; the wheel then spins to it.
+async function drawWithWheel() {
+  if (!confirm('Spin the wheel and draw the winning movie? This can only happen once per round.')) return;
+  $('msg').textContent = '';
+  $('draw').disabled = true;
+  try { spinAdmin(await call('/api/admin/draw', {})); }
+  catch (e) { $('msg').textContent = e.message; $('draw').disabled = false; }
+}
+
+function spinAdmin(st) {
+  if (spinning) return;
+  spinning = true;
+  state = st;
+  const r = st.round, w = r.entries[r.winnerIndex];
+  $('round-card').innerHTML = '<h2>🎡 Spinning the wheel…</h2><div id="admin-wheel"></div><p class="wheel-caption" id="admin-caption" aria-live="polite" style="text-align:center"></p>';
+  spinWheel($('admin-wheel'), r.entries.map((e) => e.member), r.winnerIndex,
+    () => { $('admin-caption').textContent = '🎉 ' + w.member + '\\'s pick: ' + w.title; },
+    () => { spinning = false; render(st); });
+}
+
 async function act(action, payload, confirmText) {
   if (confirmText && !confirm(confirmText)) return;
   $('msg').textContent = '';
@@ -404,10 +578,22 @@ async function act(action, payload, confirmText) {
 document.addEventListener('click', (e) => {
   const b = e.target.closest('button');
   if (!b) return;
-  if (b.id === 'draw') return act('draw', {}, 'Draw the winning movie now? This can only happen once per round.');
+  if (b.id === 'draw') return drawWithWheel();
+  if (b.id === 'replay') return spinAdmin(state);
+  if (b.id === 'peek-all') {
+    const ids = allSubs(state).map((x) => x.id);
+    const everyShown = ids.every((id) => revealed.has(id));
+    ids.forEach((id) => (everyShown ? revealed.delete(id) : revealed.add(id)));
+    return render(state);
+  }
   if (b.id === 'new-round') return act('new-round', {}, 'Start a new movie night? Progress resets to 0 of ' + state.total + '. Past winners are kept.');
   if (b.id === 'logout') return call('/api/admin/logout', {}).finally(showLogin);
   const id = Number(b.dataset.id);
+  if (b.dataset.act === 'peek') {
+    revealed.has(id) ? revealed.delete(id) : revealed.add(id);
+    render(state);
+    return document.querySelector('[data-act="peek"][data-id="' + id + '"]')?.focus();
+  }
   if (b.dataset.act === 'remove') return act('remove', { id }, 'Remove this submission? You can restore it later.');
   if (b.dataset.act === 'restore') return act('restore', { id });
   if (b.dataset.act === 'edit') {

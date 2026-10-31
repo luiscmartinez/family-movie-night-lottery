@@ -4,6 +4,7 @@ import { AdminAuth, cookieValue, LOCKOUT_MS, passwordMatches, SESSION_TTL_MS } f
 import { adminPassword, ConfigError, loadConfig, parseMembers } from '../src/config.js';
 import { evaluateRound, Lottery } from '../src/lottery.js';
 import { LotteryStore } from '../src/store.js';
+import { WHEEL_SCRIPT } from '../src/ui.js';
 import { Clock, MEMBERS, MOVIES, makeLottery, nodeDb, submitAll } from './helpers.js';
 
 const sub = (id, member, title, extra = {}) => ({ id, member, title, removedAt: null, ...extra });
@@ -147,4 +148,39 @@ test('a family of seven: the draw needs exactly seven picks, each with a 1-in-7 
   const round = lottery.draw();
   assert.equal(round.entries.length, 7);
   assert.ok(seven.includes(round.winnerMember));
+});
+
+// The wheel animation code runs in the browser; evaluate the exact script the pages embed.
+const wheel = new Function(`${WHEEL_SCRIPT}; return { wheelRotation, wheelSvg };`)();
+
+test('wheel: the spin always stops with the saved winner under the pointer', () => {
+  for (let n = 2; n <= 30; n++) {
+    const seg = 360 / n;
+    for (let winner = 0; winner < n; winner++) {
+      for (const jitter of [-0.3, 0, 0.3]) {
+        const rotation = wheel.wheelRotation(n, winner, jitter, 6);
+        assert.ok(rotation > 360 * 4, 'spins several full turns');
+        // After rotating, the pointer (0deg, top) is this far into the slices.
+        const atPointer = ((-rotation % 360) + 360) % 360;
+        assert.equal(Math.floor(atPointer / seg), winner, `n=${n} winner=${winner} jitter=${jitter}`);
+      }
+    }
+  }
+});
+
+test('wheel: one slice per entry, labels escaped and shortened', () => {
+  const svg = wheel.wheelSvg(['Up', '<script>', 'A Really Long Movie Title That Goes On']);
+  assert.equal(svg.match(/class="seg"/g).length, 3);
+  assert.ok(!svg.includes('<script>'));
+  assert.ok(svg.includes('&lt;script&gt;'));
+  assert.ok(svg.includes('A Really Lon…'));
+});
+
+test('public status gives the wheel the saved winner position', () => {
+  const { lottery } = makeLottery();
+  submitAll(lottery, 9);
+  const round = lottery.draw();
+  const s = lottery.publicStatus();
+  assert.equal(s.winnerIndex, round.winnerIndex);
+  assert.deepEqual(s.entries[s.winnerIndex], { member: round.winnerMember, title: round.winnerTitle });
 });

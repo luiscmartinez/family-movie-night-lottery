@@ -6,9 +6,9 @@ Every family member submits one movie on the website. No accounts, no app. The o
 
 It runs on a single **Cloudflare Worker** with a **SQLite-backed Durable Object** for storage, all on the Workers Free plan. **Workers Builds** deploys it from GitHub on every push.
 
-| Accepting submissions | All movies in | Winner | Admin dashboard |
-| --- | --- | --- | --- |
-| ![Open](docs/screenshots/open.png) | ![Ready](docs/screenshots/ready.png) | ![Winner](docs/screenshots/completed.png) | ![Admin](docs/screenshots/admin.png) |
+| Accepting submissions | All movies in | Wheel spin | Winner | Admin dashboard |
+| --- | --- | --- | --- | --- |
+| ![Open](docs/screenshots/open.png) | ![Ready](docs/screenshots/ready.png) | ![Wheel](docs/screenshots/wheel.png) | ![Winner](docs/screenshots/completed.png) | ![Admin](docs/screenshots/admin.png) |
 
 ---
 
@@ -59,11 +59,12 @@ Nothing runs on a schedule. There's no polling and no automatic draw. The Worker
 * One click picks one of the submissions using `crypto.getRandomValues` with rejection sampling, so every movie has exactly the same chance (1 in 7 for a family of seven).
 * The winner is written with a single compare-and-set update (`UPDATE rounds … WHERE status = 'Open' RETURNING`). Only the first request can draw, so double-clicks and two admins clicking at once still give one winner.
 * After the draw, the round's submissions can't be changed and new submissions are refused.
+* **The wheel is only an animation.** The server picks and saves the winner first. The wheel of fortune on `/admin` and on the main page then spins to land on that saved result (`winnerIndex`), so a refresh, a replay or a second device always shows the same winner. A test checks that, for every family size from 2 to 30, the slice under the pointer is always the saved winner.
 
 **What the public sees:**
 * While the round is open: how many people have submitted and who's still missing. Movie titles stay secret.
-* Once everyone has a valid pick: "All movies are in! Waiting for the organizer to draw our winner…"
-* After the draw: the winning movie, who submitted it, the date, and everyone's picks.
+* Once everyone has a valid pick: "All movies are in! Waiting for the organizer to spin the wheel…"
+* After the draw: the wheel spins once on each device, with one slice per movie, and lands on the winner. Then the winner card appears: the movie, who submitted it, the date, and everyone's picks. **🎡 Replay the spin** plays it again, for example on the TV.
 
 ## 2. Deploy from GitHub with Workers Builds
 
@@ -113,12 +114,13 @@ Open **`/admin`** and sign in with `ADMIN_PASSWORD`. You stay signed in on that 
 
 **While people are submitting** (it can take a couple of days):
 * Every family member is listed with a badge: **✓ Ready**, **! Duplicate** or **Not yet**, plus their submissions and when they were sent.
+* **Movie titles are hidden** (`••••••••`) so you can manage the lottery without spoiling the picks. Click the **eye icon** next to an entry to show or hide that title, or use **Show all titles** / **Hide all titles**. Titles are hidden again every time you open the page.
 * **Edit** fixes a typo in a movie title.
 * **Remove** takes out an extra or wrong entry. Removed entries are listed under *Removed*, where you can **Restore** them.
 * **+ Add a movie for …** enters a pick for someone who told you in person.
 * If someone picked the wrong name, remove that entry and add it again under the right name.
 
-**Drawing the winner:** when every member shows ✓ Ready, the **🎲 Draw Winning Movie** button turns on. Click it and confirm. The winner appears on the main page straight away. It's permanent and can't be redrawn.
+**Drawing the winner:** when every member shows ✓ Ready, the **🎲 Draw Winning Movie** button turns on. Click it and confirm. The winner is picked and saved at that moment, and then the wheel spins to reveal it. On your dashboard the slices show family members' names, since titles are hidden. On the main page they show the movie titles. The result is permanent and can't be redrawn. **🎡 Replay the spin** shows the animation again.
 
 **Next movie night:** click **Start New Round**. Progress resets to 0 and the previous winner moves to *Past winners*. Share the same link again.
 

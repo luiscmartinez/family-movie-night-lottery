@@ -153,6 +153,7 @@ export class Lottery {
       state: 'completed',
       submittedCount: total,
       winner: { title: round.winnerTitle, member: round.winnerMember, drawnAt: round.drawnAt },
+      winnerIndex: round.winnerIndex, // lets the page's wheel land on the saved result
       entries: round.entries.map(({ member, title }) => ({ member, title })),
     };
   }

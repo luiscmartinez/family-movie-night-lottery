@@ -183,8 +183,9 @@ test('8: fairness: every movie has an equal 1-in-9 chance', async (t) => {
     for (let i = 0; i < N; i++) counts[secureRandomInt(9)]++;
     const expected = N / 9;
     const chi2 = counts.reduce((s, c) => s + (c - expected) ** 2 / expected, 0);
-    // df = 8; p = 0.001 critical value is 26.12.
-    assert.ok(chi2 < 26.12, `chi-square ${chi2.toFixed(2)} counts ${counts}`);
+    // df = 8. 42.7 is the p = 1e-6 critical value: a fair draw fails this
+    // about once in a million runs, while a real bias would blow far past it.
+    assert.ok(chi2 < 42.7, `chi-square ${chi2.toFixed(2)} counts ${counts}`);
     for (const c of counts) assert.ok(Math.abs(c / N - 1 / 9) < 0.005, `share ${(c / N).toFixed(4)}`);
   });
 
@@ -199,6 +200,6 @@ test('8: fairness: every movie has an equal 1-in-9 chance', async (t) => {
     }
     const expected = rounds / 9;
     const chi2 = [...wins.values()].reduce((s, c) => s + (c - expected) ** 2 / expected, 0);
-    assert.ok(chi2 < 26.12, `chi-square ${chi2.toFixed(2)} ${JSON.stringify(Object.fromEntries(wins))}`);
+    assert.ok(chi2 < 42.7, `chi-square ${chi2.toFixed(2)} ${JSON.stringify(Object.fromEntries(wins))}`);
   });
 });
