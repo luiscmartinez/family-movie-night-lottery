@@ -137,7 +137,7 @@ h1{font-family:"Roboto Slab",Georgia,serif;font-weight:800;font-size:clamp(2.1re
 .winner-date{color:var(--muted);margin:4px 0 18px}
 .popcorn-line{font-weight:800;color:var(--burgundy);font-size:1.15rem;margin:0}
 .reveal{animation:pop .7s cubic-bezier(.2,1.4,.4,1)}
-.card>.confetti{position:absolute;inset:0;pointer-events:none;overflow:hidden;z-index:0;opacity:.75}
+.confetti{position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:50}
 .confetti i{position:absolute;top:-12px;width:8px;height:14px;border-radius:2px;opacity:.9;animation:fall linear forwards}
 details.picks{margin-top:22px;padding-top:16px;border-top:1px dashed #dccdb6;text-align:left}
 details.picks summary{cursor:pointer;font-weight:700;color:var(--muted);text-align:center;list-style-position:inside}
@@ -212,7 +212,7 @@ footer a{color:inherit}
 @keyframes tick{40%{transform:rotate(-14deg)}}
 @keyframes winpulse{50%{filter:brightness(1.4)}}
 @keyframes pop{from{transform:scale(.85);opacity:0}}
-@keyframes fall{to{transform:translateY(560px) rotate(540deg)}}
+@keyframes fall{85%{opacity:.9}to{transform:translateY(calc(100vh + 30px)) rotate(540deg);opacity:0}}
 @media (max-width:420px){main{padding-top:28px}.card{padding:24px 18px;border-radius:22px}.card h2{font-size:1.25rem}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 `;
@@ -338,8 +338,7 @@ function renderReady() {
 function renderCompleted(s) {
   const w = s.winner;
   const picks = s.entries.map((e) => '<li class="' + (e.title === w.title && e.member === w.member ? 'win' : '') + '"><span>' + esc(e.title) + '</span><span>' + esc(e.member) + '</span></li>').join('');
-  return '<div class="confetti" id="confetti"></div>'
-    + '<p class="winner-kicker">🎉 Tonight\\'s Winning Movie!</p>'
+  return '<p class="winner-kicker">🎉 Tonight\\'s Winning Movie!</p>'
     + '<p class="winner-title reveal">' + esc(w.title) + '</p>'
     + '<p class="winner-by">Submitted by <strong>' + esc(w.member) + '</strong></p>'
     + '<p class="winner-date">Drawn ' + esc(fmtDate(w.drawnAt)) + '</p>'
@@ -348,9 +347,15 @@ function renderCompleted(s) {
     + '<details class="picks"><summary>See all ' + s.entries.length + ' picks</summary><ol>' + picks + '</ol></details>';
 }
 
+// A full-screen layer that falls past the bottom of the screen, fades out,
+// and removes itself, so no pieces are left resting on the page.
 function confetti() {
-  const box = $('confetti');
-  if (!box || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  document.querySelector('.confetti')?.remove();
+  const box = document.createElement('div');
+  box.className = 'confetti';
+  box.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(box);
   const colors = ['#b5172b', '#f2bf68', '#e58a3a', '#2f7d4f', '#3b6fb6', '#d24d7a'];
   for (let i = 0; i < 60; i++) {
     const p = document.createElement('i');
@@ -360,6 +365,7 @@ function confetti() {
     p.style.animationDelay = Math.random() * 1.2 + 's';
     box.appendChild(p);
   }
+  setTimeout(() => box.remove(), 6500); // longest piece: 1.2s delay + 5s fall
 }
 
 function fillNames(s) {
